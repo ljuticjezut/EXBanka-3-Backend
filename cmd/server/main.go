@@ -15,15 +15,15 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
 
+	"EXBanka/backend/internal/handler"
+	"EXBanka/backend/internal/swagger"
 	"EXBanka/internal/config"
 	"EXBanka/internal/database"
 	"EXBanka/internal/middleware"
 	infrasvc "EXBanka/internal/service"
-	"EXBanka/backend/internal/handler"
-	"EXBanka/backend/internal/swagger"
 
-	authv1         "EXBanka/gen/proto/auth/v1"
-	employeev1     "EXBanka/gen/proto/employee/v1"
+	authv1 "EXBanka/gen/proto/auth/v1"
+	employeev1 "EXBanka/gen/proto/employee/v1"
 	notificationv1 "EXBanka/gen/proto/notification/v1"
 )
 
@@ -40,12 +40,15 @@ func main() {
 	if err := database.SeedPermissions(db); err != nil {
 		log.Fatalf("Permission seeding failed: %v", err)
 	}
+	if err := database.SeedDefaultAdmin(db); err != nil {
+		log.Fatalf("Admin seeding failed: %v", err)
+	}
 
 	notifSvc := infrasvc.NewNotificationService(cfg)
 
-	authH     := handler.NewAuthHandler(cfg, db, notifSvc)
+	authH := handler.NewAuthHandler(cfg, db, notifSvc)
 	employeeH := handler.NewEmployeeHandler(cfg, db, notifSvc)
-	notifH    := handler.NewNotificationHandler(cfg, notifSvc)
+	notifH := handler.NewNotificationHandler(cfg, notifSvc)
 
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(

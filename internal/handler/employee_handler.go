@@ -4,12 +4,12 @@ import (
 	"context"
 	"time"
 
+	"EXBanka/backend/internal/service"
 	employeev1 "EXBanka/gen/proto/employee/v1"
 	"EXBanka/internal/config"
 	"EXBanka/internal/models"
 	"EXBanka/internal/repository"
 	infrasvc "EXBanka/internal/service"
-	"EXBanka/backend/internal/service"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -152,6 +152,9 @@ func (h *EmployeeHandler) UpdateEmployee(ctx context.Context, req *employeev1.Up
 
 func (h *EmployeeHandler) SetEmployeeActive(ctx context.Context, req *employeev1.SetEmployeeActiveRequest) (*employeev1.SetEmployeeActiveResponse, error) {
 	if err := h.svc.SetEmployeeActive(uint(req.Id), req.Aktivan); err != nil {
+		if err.Error() == "cannot deactivate an admin employee" {
+			return nil, status.Errorf(codes.PermissionDenied, "%s", err.Error())
+		}
 		return nil, status.Errorf(codes.NotFound, "%s", err.Error())
 	}
 

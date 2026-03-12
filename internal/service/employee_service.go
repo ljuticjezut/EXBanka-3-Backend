@@ -8,6 +8,7 @@ import (
 	"EXBanka/internal/models"
 	"EXBanka/internal/repository"
 	infrasvc "EXBanka/internal/service"
+	"EXBanka/internal/util"
 
 	"gorm.io/gorm"
 )
@@ -44,6 +45,16 @@ type CreateEmployeeInput struct {
 }
 
 func (s *EmployeeService) CreateEmployee(input CreateEmployeeInput) (*models.Employee, error) {
+	if err := util.ValidatePhoneNumber(input.BrojTelefona); err != nil {
+		return nil, err
+	}
+	if err := util.ValidateBankEmail(input.Email); err != nil {
+		return nil, err
+	}
+	if err := util.ValidateDateOfBirth(input.DatumRodjenja); err != nil {
+		return nil, err
+	}
+
 	emailExists, err := s.employeeRepo.EmailExists(input.Email, 0)
 	if err != nil {
 		return nil, err
@@ -132,6 +143,16 @@ func (s *EmployeeService) UpdateEmployee(id uint, input UpdateEmployeeInput) (*m
 		return nil, fmt.Errorf("cannot edit an admin employee")
 	}
 
+	if err := util.ValidatePhoneNumber(input.BrojTelefona); err != nil {
+		return nil, err
+	}
+	if err := util.ValidateBankEmail(input.Email); err != nil {
+		return nil, err
+	}
+	if err := util.ValidateDateOfBirth(input.DatumRodjenja); err != nil {
+		return nil, err
+	}
+
 	if input.Email != emp.Email {
 		exists, err := s.employeeRepo.EmailExists(input.Email, id)
 		if err != nil {
@@ -172,9 +193,12 @@ func (s *EmployeeService) UpdateEmployee(id uint, input UpdateEmployeeInput) (*m
 }
 
 func (s *EmployeeService) SetEmployeeActive(id uint, aktivan bool) error {
-	_, err := s.employeeRepo.FindByID(id)
+	emp, err := s.employeeRepo.FindByID(id)
 	if err != nil {
 		return fmt.Errorf("employee not found")
+	}
+	if !aktivan && emp.IsAdmin() {
+		return fmt.Errorf("cannot deactivate an admin employee")
 	}
 	return s.employeeRepo.UpdateFields(id, map[string]interface{}{"aktivan": aktivan})
 }
