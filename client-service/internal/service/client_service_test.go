@@ -225,6 +225,94 @@ func TestUpdateClient_DuplicateEmail(t *testing.T) {
 	}
 }
 
+func TestCreateClient_AssignsDefaultPermissions(t *testing.T) {
+	setPermsCalled := false
+	clientRepo := &mockClientRepo{
+		emailExistsFn: func(email string, excludeID uint) (bool, error) { return false, nil },
+		createFn:      func(client *models.Client) error { client.ID = 5; return nil },
+		setPermissionsFn: func(client *models.Client, perms []models.Permission) error {
+			setPermsCalled = true
+			if len(perms) == 0 {
+				t.Error("SetPermissions called with empty permissions slice")
+			}
+			return nil
+		},
+	}
+	permRepo := &mockPermRepo{
+		findByNamesForSubjectFn: func(names []string, subjectType string) ([]models.Permission, error) {
+			return []models.Permission{{Name: "client.basic"}}, nil
+		},
+	}
+	svc := newTestClientService(clientRepo, permRepo)
+
+	_, err := svc.CreateClient(validCreateClientInput())
+	if err != nil {
+		t.Fatalf("CreateClient() unexpected error: %v", err)
+	}
+	if !setPermsCalled {
+		t.Error("CreateClient() did not call SetPermissions — default client permissions not assigned")
+	}
+}
+
+func TestCreateClient_ReturnsClientWithID(t *testing.T) {
+	clientRepo := &mockClientRepo{
+		emailExistsFn: func(email string, excludeID uint) (bool, error) { return false, nil },
+		createFn:      func(client *models.Client) error { client.ID = 42; return nil },
+	}
+	permRepo := &mockPermRepo{
+		findByNamesForSubjectFn: func(names []string, subjectType string) ([]models.Permission, error) {
+			return []models.Permission{}, nil
+		},
+	}
+	svc := newTestClientService(clientRepo, permRepo)
+
+	got, err := svc.CreateClient(validCreateClientInput())
+	if err != nil {
+		t.Fatalf("CreateClient() unexpected error: %v", err)
+	}
+	if got.ID != 42 {
+		t.Errorf("CreateClient() returned client.ID = %d, want 42", got.ID)
+	}
+}
+
+func TestCreateClient_AccountOpeningFlow(t *testing.T) {
+	// Simulates employee creating a client during account opening:
+	// client is created, gets default permissions, and returns with a usable ID.
+	var createdClient *models.Client
+	clientRepo := &mockClientRepo{
+		emailExistsFn: func(email string, excludeID uint) (bool, error) { return false, nil },
+		createFn: func(client *models.Client) error {
+			client.ID = 99
+			createdClient = client
+			return nil
+		},
+		setPermissionsFn: func(client *models.Client, perms []models.Permission) error {
+			client.Permissions = perms
+			return nil
+		},
+	}
+	permRepo := &mockPermRepo{
+		findByNamesForSubjectFn: func(names []string, subjectType string) ([]models.Permission, error) {
+			if subjectType != models.PermissionSubjectClient {
+				t.Errorf("FindByNamesForSubject called with subjectType=%q, want %q", subjectType, models.PermissionSubjectClient)
+			}
+			return []models.Permission{{Name: models.PermClientBasic}}, nil
+		},
+	}
+	svc := newTestClientService(clientRepo, permRepo)
+
+	got, err := svc.CreateClient(validCreateClientInput())
+	if err != nil {
+		t.Fatalf("CreateClient() unexpected error: %v", err)
+	}
+	if got == nil || got.ID == 0 {
+		t.Fatal("CreateClient() returned client without ID")
+	}
+	if createdClient == nil {
+		t.Fatal("client was never passed to Create()")
+	}
+}
+
 func TestCreateClient_AcceptsNonBankEmail(t *testing.T) {
 	clientRepo := &mockClientRepo{
 		emailExistsFn: func(email string, excludeID uint) (bool, error) { return false, nil },

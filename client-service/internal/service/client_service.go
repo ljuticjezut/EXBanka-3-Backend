@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/client-service/internal/config"
@@ -91,6 +92,17 @@ func (s *ClientService) CreateClient(input CreateClientInput) (*models.Client, e
 
 	if err := s.clientRepo.Create(client); err != nil {
 		return nil, err
+	}
+
+	// Assign default client permissions (client.basic)
+	defaultPerms, err := s.permRepo.FindByNamesForSubject(
+		[]string{models.PermClientBasic},
+		models.PermissionSubjectClient,
+	)
+	if err == nil && len(defaultPerms) > 0 {
+		if permErr := s.clientRepo.SetPermissions(client, defaultPerms); permErr != nil {
+			slog.Warn("failed to assign default permissions to new client", "client_id", client.ID, "error", permErr)
+		}
 	}
 
 	return client, nil
