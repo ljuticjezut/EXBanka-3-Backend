@@ -34,11 +34,21 @@ func clientIDFromPath(path string) (uint, error) {
 	return uint(id), nil
 }
 
+type firmaJSON struct {
+	ID          uint   `json:"id"`
+	Naziv       string `json:"naziv"`
+	MaticniBroj string `json:"maticniBroj"`
+	PIB         string `json:"pib"`
+	Adresa      string `json:"adresa"`
+	SifraDelatnostiID uint `json:"sifraDelatnostiId"`
+}
+
 type clientAccountJSON struct {
 	ID                uint       `json:"id"`
 	BrojRacuna        string     `json:"brojRacuna"`
 	ClientID          *uint      `json:"clientId"`
 	FirmaID           *uint      `json:"firmaId"`
+	Firma             *firmaJSON `json:"firma,omitempty"`
 	CurrencyID        uint       `json:"currencyId"`
 	CurrencyKod       string     `json:"currencyKod"`
 	Tip               string     `json:"tip"`
@@ -70,11 +80,23 @@ func (h *ListClientAccountsHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http
 
 	result := make([]clientAccountJSON, 0, len(accounts))
 	for _, a := range accounts {
+		var firma *firmaJSON
+		if a.Firma != nil {
+			firma = &firmaJSON{
+				ID:                a.Firma.ID,
+				Naziv:             a.Firma.Naziv,
+				MaticniBroj:       a.Firma.MaticniBroj,
+				PIB:               a.Firma.PIB,
+				Adresa:            a.Firma.Adresa,
+				SifraDelatnostiID: a.Firma.SifraDelatnostiID,
+			}
+		}
 		item := clientAccountJSON{
 			ID:                a.ID,
 			BrojRacuna:        a.BrojRacuna,
 			ClientID:          a.ClientID,
 			FirmaID:           a.FirmaID,
+			Firma:             firma,
 			CurrencyID:        a.CurrencyID,
 			CurrencyKod:       a.Currency.Kod,
 			Tip:               a.Tip,

@@ -68,6 +68,58 @@ func TestListClientAccountsHTTP_ReturnsDnevnaMesecnaPotrosnja(t *testing.T) {
 	}
 }
 
+func TestListClientAccountsHTTP_PoslovniAccount_IncludesFirmaFields(t *testing.T) {
+	firmaID := uint(3)
+	accounts := []models.Account{
+		{
+			ID:      1,
+			Vrsta:   "poslovni",
+			FirmaID: &firmaID,
+			Firma: &models.Firma{
+				ID:          3,
+				Naziv:       "Test d.o.o.",
+				MaticniBroj: "12345678",
+				PIB:         "987654321",
+				Adresa:      "Bulevar 1, Beograd",
+			},
+			Currency: models.Currency{Kod: "RSD"},
+			Status:   "aktivan",
+		},
+	}
+
+	h := handler.NewListClientAccountsHTTPHandler(&mockListClientAccountsRepo{accounts: accounts})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/client/1", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp []map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	acc := resp[0]
+	firma, ok := acc["firma"].(map[string]interface{})
+	if !ok {
+		t.Fatal("response missing firma object")
+	}
+	if firma["naziv"] != "Test d.o.o." {
+		t.Errorf("expected firma.naziv='Test d.o.o.', got %v", firma["naziv"])
+	}
+	if firma["maticniBroj"] != "12345678" {
+		t.Errorf("expected firma.maticniBroj='12345678', got %v", firma["maticniBroj"])
+	}
+	if firma["pib"] != "987654321" {
+		t.Errorf("expected firma.pib='987654321', got %v", firma["pib"])
+	}
+	if firma["adresa"] != "Bulevar 1, Beograd" {
+		t.Errorf("expected firma.adresa='Bulevar 1, Beograd', got %v", firma["adresa"])
+	}
+}
+
 func TestListClientAccountsHTTP_InvalidClientID_ReturnsBadRequest(t *testing.T) {
 	h := handler.NewListClientAccountsHTTPHandler(&mockListClientAccountsRepo{})
 

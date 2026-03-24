@@ -35,7 +35,7 @@ func (r *AccountRepository) FindByBrojRacuna(broj string) (*models.Account, erro
 
 func (r *AccountRepository) ListByClientID(clientID uint) ([]models.Account, error) {
 	var accounts []models.Account
-	if err := r.db.Preload("Currency").Where("client_id = ?", clientID).Find(&accounts).Error; err != nil {
+	if err := r.db.Preload("Currency").Preload("Firma").Where("client_id = ?", clientID).Find(&accounts).Error; err != nil {
 		return nil, err
 	}
 	return accounts, nil
