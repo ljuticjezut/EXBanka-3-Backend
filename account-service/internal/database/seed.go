@@ -4,8 +4,80 @@ import (
 	"log/slog"
 
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/account-service/internal/models"
+	"github.com/RAF-SI-2025/EXBanka-3-Backend/account-service/internal/util"
 	"gorm.io/gorm"
 )
+
+// BankFirmaData returns the canonical Firma record for EXBanka itself.
+// Exported so tests can verify the business data without a DB.
+func BankFirmaData() models.Firma {
+	return models.Firma{
+		Naziv:       "EXBanka 3 DOO",
+		MaticniBroj: "99999999",
+		PIB:         "999999999",
+		Adresa:      "Knez Mihailova 1, Beograd, Srbija",
+	}
+}
+
+// BankCurrencyCodes returns the 8 currencies for which the bank holds internal accounts.
+// Exported so tests can verify the list without a DB.
+func BankCurrencyCodes() []string {
+	return []string{"RSD", "EUR", "USD", "GBP", "CHF", "JPY", "CAD", "AUD"}
+}
+
+// SeedBankAccounts creates the bank's own Firma record and one tekuci/poslovni account
+// per currency. Idempotent — safe to call on every restart.
+func SeedBankAccounts(db *gorm.DB) error {
+	// 1. Find the SifraDelatnosti "64.1" (Monetarno posredovanje)
+	var sifra models.SifraDelatnosti
+	if err := db.Where("sifra = ?", "64.1").First(&sifra).Error; err != nil {
+		return err
+	}
+
+	// 2. Find or create the bank Firma
+	firmaData := BankFirmaData()
+	var firma models.Firma
+	result := db.Where("maticni_broj = ?", firmaData.MaticniBroj).First(&firma)
+	if result.Error == gorm.ErrRecordNotFound {
+		firma = firmaData
+		firma.SifraDelatnostiID = sifra.ID
+		if err := db.Create(&firma).Error; err != nil {
+			return err
+		}
+		slog.Info("Seeded bank Firma", "naziv", firma.Naziv)
+	}
+
+	// 3. Create one account per currency (idempotent)
+	for _, kod := range BankCurrencyCodes() {
+		var currency models.Currency
+		if err := db.Where("kod = ?", kod).First(&currency).Error; err != nil {
+			slog.Warn("Currency not found, skipping bank account", "kod", kod)
+			continue
+		}
+
+		var existing models.Account
+		err := db.Where("firma_id = ? AND currency_id = ?", firma.ID, currency.ID).First(&existing).Error
+		if err == gorm.ErrRecordNotFound {
+			brojRacuna := util.GenerateAccountNumber("tekuci", "poslovni")
+			acc := models.Account{
+				BrojRacuna:        brojRacuna,
+				FirmaID:           &firma.ID,
+				CurrencyID:        currency.ID,
+				Tip:               "tekuci",
+				Vrsta:             "poslovni",
+				Naziv:             "EXBanka — " + kod,
+				Status:            "aktivan",
+			}
+			if err := db.Create(&acc).Error; err != nil {
+				return err
+			}
+			slog.Info("Seeded bank account", "currency", kod, "broj", brojRacuna)
+		}
+	}
+
+	slog.Info("Bank accounts seed complete")
+	return nil
+}
 
 func SeedCurrencies(db *gorm.DB) error {
 	currencies := []models.Currency{

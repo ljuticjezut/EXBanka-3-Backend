@@ -180,6 +180,41 @@ func TestCreateAccount_SetsDefaultLimits(t *testing.T) {
 	}
 }
 
+func TestCreateAccount_TekuciSetsOdrzavanjeRacuna255(t *testing.T) {
+	svc := service.NewAccountServiceWithRepos(&mockAccountRepo{}, &mockCurrencyRepo{}, nil)
+
+	acc, err := svc.CreateAccount(service.CreateAccountInput{
+		ClientID:   ptr(1),
+		CurrencyID: 1,
+		Tip:        "tekuci",
+		Vrsta:      "licni",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if acc.OdrzavanjeRacuna != 255.00 {
+		t.Errorf("expected OdrzavanjeRacuna=255.00 for tekuci account, got %v", acc.OdrzavanjeRacuna)
+	}
+}
+
+func TestCreateAccount_DevizniSetsOdrzavanjeRacunaZero(t *testing.T) {
+	eurCurrency := &models.Currency{ID: 2, Kod: "EUR"}
+	svc := service.NewAccountServiceWithRepos(&mockAccountRepo{}, &mockCurrencyRepo{currency: eurCurrency}, nil)
+
+	acc, err := svc.CreateAccount(service.CreateAccountInput{
+		ClientID:   ptr(1),
+		CurrencyID: 2,
+		Tip:        "devizni",
+		Vrsta:      "licni",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if acc.OdrzavanjeRacuna != 0 {
+		t.Errorf("expected OdrzavanjeRacuna=0 for devizni account, got %v", acc.OdrzavanjeRacuna)
+	}
+}
+
 func TestCreateAccount_SetsDatumIsteka5YearsFromNow(t *testing.T) {
 	svc := service.NewAccountServiceWithRepos(&mockAccountRepo{}, &mockCurrencyRepo{}, nil)
 

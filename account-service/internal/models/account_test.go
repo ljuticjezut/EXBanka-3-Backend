@@ -88,6 +88,17 @@ func TestAccount_HasMesecnaPotrosnja(t *testing.T) {
 	}
 }
 
+func TestAccount_HasOdrzavanjeRacuna(t *testing.T) {
+	rt := reflect.TypeOf(models.Account{})
+	f, ok := rt.FieldByName("OdrzavanjeRacuna")
+	if !ok {
+		t.Fatal("OdrzavanjeRacuna field not found on Account")
+	}
+	if f.Type.Kind() != reflect.Float64 {
+		t.Errorf("OdrzavanjeRacuna: expected float64, got %s", f.Type.Kind())
+	}
+}
+
 func TestAccount_HasDatumIsteka(t *testing.T) {
 	rt := reflect.TypeOf(models.Account{})
 	f, ok := rt.FieldByName("DatumIsteka")

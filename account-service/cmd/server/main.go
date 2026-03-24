@@ -44,6 +44,10 @@ func main() {
 		slog.Error("Sifre delatnosti seed failed", "error", err)
 		os.Exit(1)
 	}
+	if err := database.SeedBankAccounts(db); err != nil {
+		slog.Error("Bank accounts seed failed", "error", err)
+		os.Exit(1)
+	}
 
 	accountH := handler.NewAccountHandler(db, cfg)
 
