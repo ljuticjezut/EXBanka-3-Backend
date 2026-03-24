@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/loan-service/internal/config"
+	"github.com/RAF-SI-2025/EXBanka-3-Backend/loan-service/internal/cron"
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/loan-service/internal/database"
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/loan-service/internal/handler"
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/loan-service/internal/middleware"
@@ -36,6 +38,10 @@ func main() {
 	loanSvc := service.NewLoanService(loanRepo, installmentRepo)
 	loanH := handler.NewLoanHandler(loanSvc)
 
+	// Start cron jobs in the background.
+	go runDailyCron(cron.NewInstallmentCollector(installmentRepo))
+	go runMonthlyCron(cron.NewInterestRateUpdater(loanRepo))
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthCheck)
 	mux.Handle("/api/v1/loans/", middleware.CORS(loanH))
@@ -62,6 +68,30 @@ func main() {
 		slog.Error("HTTP shutdown error", "error", err)
 	}
 	slog.Info("loan-service stopped")
+}
+
+// runDailyCron fires at 02:00 every day to collect due installments.
+func runDailyCron(collector *cron.InstallmentCollector) {
+	for {
+		now := time.Now()
+		next := time.Date(now.Year(), now.Month(), now.Day()+1, 2, 0, 0, 0, now.Location())
+		time.Sleep(time.Until(next))
+		if err := collector.Run(time.Now()); err != nil {
+			slog.Error("Installment collection cron failed", "error", err)
+		}
+	}
+}
+
+// runMonthlyCron fires on the 1st of each month to adjust variable interest rates.
+func runMonthlyCron(updater *cron.InterestRateUpdater) {
+	for {
+		now := time.Now()
+		next := time.Date(now.Year(), now.Month()+1, 1, 3, 0, 0, 0, now.Location())
+		time.Sleep(time.Until(next))
+		if err := updater.Run(); err != nil {
+			slog.Error("Interest rate update cron failed", "error", err)
+		}
+	}
 }
 
 func healthCheck(w http.ResponseWriter, _ *http.Request) {

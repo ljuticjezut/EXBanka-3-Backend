@@ -52,6 +52,21 @@ func (r *LoanRepository) ListByStatus(status string) ([]models.Loan, error) {
 	return loans, nil
 }
 
+// FindActiveVariableLoans returns all active loans with variable interest rate.
+func (r *LoanRepository) FindActiveVariableLoans() ([]models.Loan, error) {
+	var loans []models.Loan
+	if err := r.db.Where("status = ? AND tip_kamate = ?", "aktivan", "varijabilna").
+		Find(&loans).Error; err != nil {
+		return nil, err
+	}
+	return loans, nil
+}
+
+// SaveLoan persists changes to an existing loan.
+func (r *LoanRepository) SaveLoan(loan *models.Loan) error {
+	return r.db.Save(loan).Error
+}
+
 // ListFiltered returns loans matching the non-empty fields of the filter.
 func (r *LoanRepository) ListFiltered(filter service.LoanFilter) ([]models.Loan, error) {
 	var loans []models.Loan
