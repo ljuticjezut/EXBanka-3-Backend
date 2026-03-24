@@ -12,6 +12,7 @@ type Payment struct {
 	Svrha             string    `json:"svrha"`
 	Status            string    `gorm:"default:'u_obradi'" json:"status"` // u_obradi | uspesno | neuspesno | stornirano
 	VerifikacioniKod  string    `json:"-"`
+	BrojPokusaja      int       `gorm:"default:0" json:"broj_pokusaja"`
 	RecipientID       *uint     `json:"recipient_id"`
 	VremeTransakcije  time.Time `json:"vreme_transakcije"`
 	CreatedAt         time.Time `json:"created_at"`

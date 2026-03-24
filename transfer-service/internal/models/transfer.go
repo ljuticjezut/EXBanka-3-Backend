@@ -15,6 +15,7 @@ type Transfer struct {
 	Svrha             string    `json:"svrha"`
 	Status            string    `gorm:"default:'u_obradi'" json:"status"` // uspesno | neuspesno | u_obradi
 	VerifikacioniKod  string    `json:"-"`
+	BrojPokusaja      int       `gorm:"default:0" json:"broj_pokusaja"`
 	VremeTransakcije  time.Time `json:"vreme_transakcije"`
 	RacunPosiljaoca   Account   `gorm:"foreignKey:RacunPosiljaocaID" json:"racun_posiljaoca,omitempty"`
 	RacunPrimaoca     Account   `gorm:"foreignKey:RacunPrimaocaID" json:"racun_primaoca,omitempty"`

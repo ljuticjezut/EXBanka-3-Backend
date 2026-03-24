@@ -572,3 +572,89 @@ func TestVerifyTransfer_UpdatesMesecnaPotrosnja(t *testing.T) {
 		t.Errorf("expected mesecna_potrosnja=5500 after verify, got %f", newMesecna)
 	}
 }
+
+// --- BrojPokusaja / max-attempts tests ---
+
+func TestVerifyTransfer_WrongCode_IncrementsBrojPokusaja(t *testing.T) {
+	tr := &models.Transfer{
+		ID: 1, RacunPosiljaocaID: 1, RacunPrimaocaID: 2,
+		Iznos: 500, Status: "u_obradi", VerifikacioniKod: "111111",
+		CreatedAt: time.Now(),
+	}
+	transferRepo := &mockTransferRepo{created: tr}
+	svc := service.NewTransferServiceWithRepos(
+		newCaptureRepo(map[uint]*models.Account{1: rsdAccount(1, 5000), 2: rsdAccount(2, 0)}),
+		transferRepo, &mockExchangeRateService{},
+	)
+
+	svc.VerifyTransfer(1, "000000") // wrong code
+
+	if transferRepo.created == nil {
+		t.Fatal("expected transfer to be saved after wrong code")
+	}
+	if transferRepo.created.BrojPokusaja != 1 {
+		t.Errorf("expected BrojPokusaja=1 after one wrong attempt, got %d", transferRepo.created.BrojPokusaja)
+	}
+}
+
+func TestVerifyTransfer_TwoWrongCodes_StillPending(t *testing.T) {
+	tr := &models.Transfer{
+		ID: 1, RacunPosiljaocaID: 1, RacunPrimaocaID: 2,
+		Iznos: 500, Status: "u_obradi", VerifikacioniKod: "111111",
+		CreatedAt: time.Now(),
+	}
+	transferRepo := &mockTransferRepo{created: tr}
+	svc := service.NewTransferServiceWithRepos(
+		newCaptureRepo(map[uint]*models.Account{1: rsdAccount(1, 5000), 2: rsdAccount(2, 0)}),
+		transferRepo, &mockExchangeRateService{},
+	)
+
+	svc.VerifyTransfer(1, "000000")
+	svc.VerifyTransfer(1, "000000")
+
+	if transferRepo.created.Status != "u_obradi" {
+		t.Errorf("expected status=u_obradi after 2 wrong attempts, got %s", transferRepo.created.Status)
+	}
+}
+
+func TestVerifyTransfer_ThreeWrongCodes_SetsStatusStornirano(t *testing.T) {
+	tr := &models.Transfer{
+		ID: 1, RacunPosiljaocaID: 1, RacunPrimaocaID: 2,
+		Iznos: 500, Status: "u_obradi", VerifikacioniKod: "111111",
+		CreatedAt: time.Now(),
+	}
+	transferRepo := &mockTransferRepo{created: tr}
+	svc := service.NewTransferServiceWithRepos(
+		newCaptureRepo(map[uint]*models.Account{1: rsdAccount(1, 5000), 2: rsdAccount(2, 0)}),
+		transferRepo, &mockExchangeRateService{},
+	)
+
+	svc.VerifyTransfer(1, "000000")
+	svc.VerifyTransfer(1, "000000")
+	svc.VerifyTransfer(1, "000000")
+
+	if transferRepo.created == nil || transferRepo.created.Status != "stornirano" {
+		t.Errorf("expected status=stornirano after 3 wrong attempts, got %v", transferRepo.created)
+	}
+}
+
+func TestVerifyTransfer_ThreeWrongCodes_ReturnsError(t *testing.T) {
+	tr := &models.Transfer{
+		ID: 1, RacunPosiljaocaID: 1, RacunPrimaocaID: 2,
+		Iznos: 500, Status: "u_obradi", VerifikacioniKod: "111111",
+		CreatedAt: time.Now(),
+	}
+	transferRepo := &mockTransferRepo{created: tr}
+	svc := service.NewTransferServiceWithRepos(
+		newCaptureRepo(map[uint]*models.Account{1: rsdAccount(1, 5000), 2: rsdAccount(2, 0)}),
+		transferRepo, &mockExchangeRateService{},
+	)
+
+	svc.VerifyTransfer(1, "000000")
+	svc.VerifyTransfer(1, "000000")
+	_, err := svc.VerifyTransfer(1, "000000")
+
+	if err == nil {
+		t.Fatal("expected error after 3 wrong attempts, got nil")
+	}
+}

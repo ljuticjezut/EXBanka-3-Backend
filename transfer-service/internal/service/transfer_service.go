@@ -178,6 +178,13 @@ func (s *TransferService) VerifyTransfer(transferID uint, verificationCode strin
 	}
 
 	if transfer.VerifikacioniKod != verificationCode {
+		transfer.BrojPokusaja++
+		if transfer.BrojPokusaja >= 3 {
+			transfer.Status = "stornirano"
+			_ = s.transferRepo.Save(transfer)
+			return nil, fmt.Errorf("maximum verification attempts exceeded, transfer cancelled")
+		}
+		_ = s.transferRepo.Save(transfer)
 		return nil, fmt.Errorf("invalid verification code")
 	}
 

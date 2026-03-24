@@ -145,6 +145,13 @@ func (s *PaymentService) VerifyPayment(paymentID uint, verificationCode string) 
 	}
 
 	if payment.VerifikacioniKod != verificationCode {
+		payment.BrojPokusaja++
+		if payment.BrojPokusaja >= 3 {
+			payment.Status = "stornirano"
+			_ = s.paymentRepo.Save(payment)
+			return nil, fmt.Errorf("maximum verification attempts exceeded, payment cancelled")
+		}
+		_ = s.paymentRepo.Save(payment)
 		return nil, fmt.Errorf("invalid verification code")
 	}
 

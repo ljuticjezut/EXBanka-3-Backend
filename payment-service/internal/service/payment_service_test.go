@@ -54,6 +54,9 @@ func (m *mockPaymentRepo) Create(p *models.Payment) error {
 	}
 	p.ID = m.nextID
 	m.nextID++
+	if p.CreatedAt.IsZero() {
+		p.CreatedAt = time.Now()
+	}
 	m.created = p
 	m.findByID[p.ID] = p
 	return nil
@@ -386,6 +389,95 @@ func TestVerifyPayment_ExpiredCode_SetsStatusStornirano(t *testing.T) {
 	}
 	if paymentRepo.saved.Status != "stornirano" {
 		t.Errorf("expected status=stornirano after expiry, got %s", paymentRepo.saved.Status)
+	}
+}
+
+// --- BrojPokusaja / max-attempts tests ---
+
+func TestVerifyPayment_WrongCode_IncrementsBrojPokusaja(t *testing.T) {
+	accountRepo := &mockAccountRepo{accounts: map[uint]*models.Account{
+		1: rsdAccount(1, 5000, nil),
+	}}
+	paymentRepo := newMockPaymentRepo()
+	svc := service.NewPaymentServiceWithRepos(accountRepo, paymentRepo, nil, nil)
+
+	created, _ := svc.CreatePayment(service.CreatePaymentInput{
+		RacunPosiljaocaID: 1,
+		RacunPrimaocaBroj: "000000000000000098",
+		Iznos:             100,
+	})
+	svc.VerifyPayment(created.ID, "000000") // wrong code
+
+	if paymentRepo.saved == nil {
+		t.Fatal("expected payment to be saved after wrong code")
+	}
+	if paymentRepo.saved.BrojPokusaja != 1 {
+		t.Errorf("expected BrojPokusaja=1 after one wrong attempt, got %d", paymentRepo.saved.BrojPokusaja)
+	}
+}
+
+func TestVerifyPayment_TwoWrongCodes_StillPending(t *testing.T) {
+	accountRepo := &mockAccountRepo{accounts: map[uint]*models.Account{
+		1: rsdAccount(1, 5000, nil),
+	}}
+	paymentRepo := newMockPaymentRepo()
+	svc := service.NewPaymentServiceWithRepos(accountRepo, paymentRepo, nil, nil)
+
+	created, _ := svc.CreatePayment(service.CreatePaymentInput{
+		RacunPosiljaocaID: 1,
+		RacunPrimaocaBroj: "000000000000000098",
+		Iznos:             100,
+	})
+	svc.VerifyPayment(created.ID, "000000")
+	svc.VerifyPayment(created.ID, "000000")
+
+	if paymentRepo.saved == nil {
+		t.Fatal("expected payment to be saved")
+	}
+	if paymentRepo.saved.Status != "u_obradi" {
+		t.Errorf("expected status=u_obradi after 2 wrong attempts, got %s", paymentRepo.saved.Status)
+	}
+}
+
+func TestVerifyPayment_ThreeWrongCodes_SetsStatusStornirano(t *testing.T) {
+	accountRepo := &mockAccountRepo{accounts: map[uint]*models.Account{
+		1: rsdAccount(1, 5000, nil),
+	}}
+	paymentRepo := newMockPaymentRepo()
+	svc := service.NewPaymentServiceWithRepos(accountRepo, paymentRepo, nil, nil)
+
+	created, _ := svc.CreatePayment(service.CreatePaymentInput{
+		RacunPosiljaocaID: 1,
+		RacunPrimaocaBroj: "000000000000000098",
+		Iznos:             100,
+	})
+	svc.VerifyPayment(created.ID, "000000")
+	svc.VerifyPayment(created.ID, "000000")
+	svc.VerifyPayment(created.ID, "000000")
+
+	if paymentRepo.saved == nil || paymentRepo.saved.Status != "stornirano" {
+		t.Errorf("expected status=stornirano after 3 wrong attempts, got %v", paymentRepo.saved)
+	}
+}
+
+func TestVerifyPayment_ThreeWrongCodes_ReturnsError(t *testing.T) {
+	accountRepo := &mockAccountRepo{accounts: map[uint]*models.Account{
+		1: rsdAccount(1, 5000, nil),
+	}}
+	paymentRepo := newMockPaymentRepo()
+	svc := service.NewPaymentServiceWithRepos(accountRepo, paymentRepo, nil, nil)
+
+	created, _ := svc.CreatePayment(service.CreatePaymentInput{
+		RacunPosiljaocaID: 1,
+		RacunPrimaocaBroj: "000000000000000098",
+		Iznos:             100,
+	})
+	svc.VerifyPayment(created.ID, "000000")
+	svc.VerifyPayment(created.ID, "000000")
+	_, err := svc.VerifyPayment(created.ID, "000000")
+
+	if err == nil {
+		t.Fatal("expected error after 3 wrong attempts, got nil")
 	}
 }
 
