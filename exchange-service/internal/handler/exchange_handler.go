@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"time"
 
 	exchangev1 "github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/gen/proto/exchange/v1"
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/provider"
@@ -22,8 +23,9 @@ type ExchangeHandler struct {
 }
 
 func NewExchangeHandler() *ExchangeHandler {
-	p := provider.NewStaticRateProvider()
-	svc := service.NewExchangeServiceWithProvider(p)
+	static := provider.NewStaticRateProvider()
+	cached := provider.NewCachedProvider(static, static, 24*time.Hour)
+	svc := service.NewExchangeServiceWithProvider(cached)
 	return &ExchangeHandler{svc: svc}
 }
 
