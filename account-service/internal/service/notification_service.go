@@ -39,6 +39,27 @@ func (s *NotificationService) SendAccountCreatedEmail(toEmail, clientName, brojR
 	return s.sendEmail(toEmail, "Novi račun uspešno otvoren — EXBanka", body)
 }
 
+func (s *NotificationService) SendCardCreatedEmail(toEmail, clientName, brojKartice, vrstaKartice string) error {
+	masked := brojKartice
+	if len(brojKartice) == 16 {
+		masked = brojKartice[:4] + "********" + brojKartice[12:]
+	}
+	body := fmt.Sprintf(`
+<!DOCTYPE html><html><body>
+<h2>Nova kartica izdata!</h2>
+<p>Poštovani %s,</p>
+<p>Obaveštavamo Vas da je uspešno izdata nova platna kartica:</p>
+<table style="border-collapse:collapse;margin:16px 0;">
+  <tr><td style="padding:6px 16px 6px 0;font-weight:bold;">Broj kartice:</td><td>%s</td></tr>
+  <tr><td style="padding:6px 16px 6px 0;font-weight:bold;">Vrsta:</td><td>%s</td></tr>
+</table>
+<p>Srdačan pozdrav,<br/>EXBanka</p>
+</body></html>
+`, clientName, masked, vrstaKartice)
+
+	return s.sendEmail(toEmail, "Nova kartica izdata — EXBanka", body)
+}
+
 func (s *NotificationService) sendEmail(to, subject, htmlBody string) error {
 	m := gomail.NewMessage()
 	m.SetHeader("From", s.cfg.SMTPFrom)
