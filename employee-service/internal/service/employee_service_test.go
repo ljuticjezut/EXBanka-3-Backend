@@ -15,15 +15,16 @@ import (
 // ---- mock employee repository ----
 
 type mockEmployeeRepo struct {
-	createFn          func(emp *models.Employee) error
-	findByIDFn        func(id uint) (*models.Employee, error)
-	findByEmailFn     func(email string) (*models.Employee, error)
-	listFn            func(filter repository.EmployeeFilter) ([]models.Employee, int64, error)
-	updateFn          func(emp *models.Employee) error
-	updateFieldsFn    func(id uint, fields map[string]interface{}) error
-	setPermissionsFn  func(emp *models.Employee, permissions []models.Permission) error
-	emailExistsFn     func(email string, excludeID uint) (bool, error)
-	usernameExistsFn  func(username string, excludeID uint) (bool, error)
+	createFn         func(emp *models.Employee) error
+	findByIDFn       func(id uint) (*models.Employee, error)
+	findByEmailFn    func(email string) (*models.Employee, error)
+	listAllFn        func() ([]models.Employee, error)
+	listFn           func(filter repository.EmployeeFilter) ([]models.Employee, int64, error)
+	updateFn         func(emp *models.Employee) error
+	updateFieldsFn   func(id uint, fields map[string]interface{}) error
+	setPermissionsFn func(emp *models.Employee, permissions []models.Permission) error
+	emailExistsFn    func(email string, excludeID uint) (bool, error)
+	usernameExistsFn func(username string, excludeID uint) (bool, error)
 }
 
 func (m *mockEmployeeRepo) Create(emp *models.Employee) error {
@@ -43,6 +44,13 @@ func (m *mockEmployeeRepo) FindByID(id uint) (*models.Employee, error) {
 func (m *mockEmployeeRepo) FindByEmail(email string) (*models.Employee, error) {
 	if m.findByEmailFn != nil {
 		return m.findByEmailFn(email)
+	}
+	return nil, errors.New("not implemented")
+}
+
+func (m *mockEmployeeRepo) ListAll() ([]models.Employee, error) {
+	if m.listAllFn != nil {
+		return m.listAllFn()
 	}
 	return nil, errors.New("not implemented")
 }
@@ -110,6 +118,33 @@ func (m *mockPermRepo) FindByNamesForSubject(names []string, subjectType string)
 	return nil, errors.New("not implemented")
 }
 
+type mockActuaryProfileRepo struct {
+	findByEmployeeIDFn   func(employeeID uint) (*models.ActuaryProfile, error)
+	upsertFn             func(profile *models.ActuaryProfile) error
+	deleteByEmployeeIDFn func(employeeID uint) error
+}
+
+func (m *mockActuaryProfileRepo) FindByEmployeeID(employeeID uint) (*models.ActuaryProfile, error) {
+	if m.findByEmployeeIDFn != nil {
+		return m.findByEmployeeIDFn(employeeID)
+	}
+	return nil, nil
+}
+
+func (m *mockActuaryProfileRepo) Upsert(profile *models.ActuaryProfile) error {
+	if m.upsertFn != nil {
+		return m.upsertFn(profile)
+	}
+	return nil
+}
+
+func (m *mockActuaryProfileRepo) DeleteByEmployeeID(employeeID uint) error {
+	if m.deleteByEmployeeIDFn != nil {
+		return m.deleteByEmployeeIDFn(employeeID)
+	}
+	return nil
+}
+
 // ---- mock token repository ----
 
 type mockTokenRepo struct {
@@ -144,13 +179,14 @@ func (m *mockTokenRepo) InvalidateEmployeeTokens(employeeID uint, tokenType stri
 var _ repository.EmployeeRepositoryInterface = (*mockEmployeeRepo)(nil)
 var _ repository.PermissionRepositoryInterface = (*mockPermRepo)(nil)
 var _ repository.TokenRepositoryInterface = (*mockTokenRepo)(nil)
+var _ repository.ActuaryProfileRepositoryInterface = (*mockActuaryProfileRepo)(nil)
 
 // ---- test helper ----
 
 func newTestEmployeeService(empRepo repository.EmployeeRepositoryInterface, permRepo repository.PermissionRepositoryInterface, tokRepo repository.TokenRepositoryInterface) *service.EmployeeService {
 	cfg := &config.Config{FrontendURL: "http://localhost:5173"}
 	// notifSvc is passed as nil; tests that reach notification calls are not in scope here
-	return service.NewEmployeeServiceWithRepos(cfg, empRepo, permRepo, tokRepo, nil)
+	return service.NewEmployeeServiceWithRepos(cfg, empRepo, &mockActuaryProfileRepo{}, permRepo, tokRepo, nil)
 }
 
 // validInput returns a CreateEmployeeInput with all required fields valid.
@@ -184,7 +220,7 @@ func TestCreateEmployee_Success(t *testing.T) {
 	// CreateEmployee calls notifSvc.SendActivationEmail; we construct a real NotificationService with an unreachable SMTP host — the dial error is discarded by the service with `_ =`.
 	cfgWithNotif := &config.Config{FrontendURL: "http://localhost:5173", SMTPHost: "localhost", SMTPPort: 1, SMTPFrom: "noreply@bank.com"}
 	notifSvc := service.NewNotificationService(cfgWithNotif)
-	svc := service.NewEmployeeServiceWithRepos(cfgWithNotif, empRepo, &mockPermRepo{}, tokRepo, notifSvc)
+	svc := service.NewEmployeeServiceWithRepos(cfgWithNotif, empRepo, &mockActuaryProfileRepo{}, &mockPermRepo{}, tokRepo, notifSvc)
 
 	emp, err := svc.CreateEmployee(validCreateInput())
 	if err != nil {
@@ -263,7 +299,7 @@ func TestUpdateEmployee_CannotEditAdmin(t *testing.T) {
 		ID:    1,
 		Email: "admin@bank.com",
 		Permissions: []models.Permission{
-			{Name: "admin"},
+			{Name: models.PermEmployeeAdmin},
 		},
 	}
 	empRepo := &mockEmployeeRepo{
@@ -299,7 +335,7 @@ func TestSetEmployeeActive_DeactivateAdmin(t *testing.T) {
 		ID:    1,
 		Email: "admin@bank.com",
 		Permissions: []models.Permission{
-			{Name: "admin"},
+			{Name: models.PermEmployeeAdmin},
 		},
 		Aktivan: true,
 	}
@@ -337,5 +373,189 @@ func TestUpdateEmployeePermissions_WrongSubjectType(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "employee permissions") {
 		t.Errorf("UpdateEmployeePermissions() error = %q, want contains %q", err.Error(), "employee permissions")
+	}
+}
+
+func TestUpdateEmployeePermissions_AgentCreatesActuaryProfile(t *testing.T) {
+	emp := &models.Employee{
+		ID:    3,
+		Email: "agent@bank.com",
+		Permissions: []models.Permission{
+			{Name: models.PermEmployeeBasic},
+		},
+	}
+	updated := &models.Employee{
+		ID:    3,
+		Email: "agent@bank.com",
+		Permissions: []models.Permission{
+			{Name: models.PermEmployeeAgent},
+		},
+	}
+
+	empRepo := &mockEmployeeRepo{
+		findByIDFn: func(id uint) (*models.Employee, error) {
+			if len(emp.Permissions) == 1 && emp.Permissions[0].Name == models.PermEmployeeBasic {
+				emp.Permissions = updated.Permissions
+				return emp, nil
+			}
+			return updated, nil
+		},
+		setPermissionsFn: func(emp *models.Employee, permissions []models.Permission) error {
+			emp.Permissions = permissions
+			return nil
+		},
+	}
+	permRepo := &mockPermRepo{
+		findByNamesForSubjectFn: func(names []string, subjectType string) ([]models.Permission, error) {
+			return []models.Permission{{Name: models.PermEmployeeAgent}}, nil
+		},
+	}
+
+	var saved *models.ActuaryProfile
+	actuaryRepo := &mockActuaryProfileRepo{
+		findByEmployeeIDFn: func(employeeID uint) (*models.ActuaryProfile, error) { return nil, nil },
+		upsertFn: func(profile *models.ActuaryProfile) error {
+			saved = profile.Clone()
+			return nil
+		},
+	}
+
+	cfg := &config.Config{FrontendURL: "http://localhost:5173"}
+	svc := service.NewEmployeeServiceWithRepos(cfg, empRepo, actuaryRepo, permRepo, &mockTokenRepo{}, nil)
+
+	_, err := svc.UpdateEmployeePermissions(3, []string{models.PermEmployeeAgent})
+	if err != nil {
+		t.Fatalf("UpdateEmployeePermissions() unexpected error: %v", err)
+	}
+	if saved == nil {
+		t.Fatal("expected actuary profile to be created")
+	}
+	if saved.Limit == nil || *saved.Limit != 0 {
+		t.Fatalf("expected default agent limit 0, got %#v", saved.Limit)
+	}
+	if !saved.NeedApproval {
+		t.Fatal("expected agent profile to require approval by default")
+	}
+}
+
+func TestGetActuaryState_SupervisorHasNoLimit(t *testing.T) {
+	emp := &models.Employee{
+		ID:    5,
+		Email: "supervisor@bank.com",
+		Permissions: []models.Permission{
+			{Name: models.PermEmployeeSupervisor},
+		},
+	}
+	actuaryRepo := &mockActuaryProfileRepo{
+		findByEmployeeIDFn: func(employeeID uint) (*models.ActuaryProfile, error) {
+			return &models.ActuaryProfile{
+				EmployeeID:   employeeID,
+				UsedLimit:    2500,
+				NeedApproval: false,
+				Limit:        nil,
+			}, nil
+		},
+	}
+	empRepo := &mockEmployeeRepo{
+		findByIDFn: func(id uint) (*models.Employee, error) { return emp, nil },
+	}
+
+	cfg := &config.Config{FrontendURL: "http://localhost:5173"}
+	svc := service.NewEmployeeServiceWithRepos(cfg, empRepo, actuaryRepo, &mockPermRepo{}, &mockTokenRepo{}, nil)
+
+	state, err := svc.GetActuaryState(5)
+	if err != nil {
+		t.Fatalf("GetActuaryState() unexpected error: %v", err)
+	}
+	if !state.IsActuary || !state.IsSupervisor {
+		t.Fatalf("expected supervisor actuarial state, got %+v", state)
+	}
+	if state.Limit != nil {
+		t.Fatalf("expected supervisor limit to be nil, got %#v", state.Limit)
+	}
+}
+
+func TestListActuaryStates_ReturnsAgentsAndSupervisors(t *testing.T) {
+	employees := []models.Employee{
+		{
+			ID:       1,
+			Ime:      "Ana",
+			Prezime:  "Agent",
+			Email:    "ana@bank.com",
+			Username: "aagent",
+			Pozicija: "Agent",
+			Permissions: []models.Permission{
+				{Name: models.PermEmployeeAgent},
+			},
+			Aktivan: true,
+		},
+		{
+			ID:       2,
+			Ime:      "Sara",
+			Prezime:  "Supervisor",
+			Email:    "sara@bank.com",
+			Username: "ssupervisor",
+			Pozicija: "Supervisor",
+			Permissions: []models.Permission{
+				{Name: models.PermEmployeeSupervisor},
+			},
+			Aktivan: true,
+		},
+		{
+			ID:       3,
+			Ime:      "Boris",
+			Prezime:  "Basic",
+			Email:    "boris@bank.com",
+			Username: "bbasic",
+			Pozicija: "Clerk",
+			Permissions: []models.Permission{
+				{Name: models.PermEmployeeBasic},
+			},
+			Aktivan: true,
+		},
+	}
+
+	empRepo := &mockEmployeeRepo{
+		listAllFn: func() ([]models.Employee, error) { return employees, nil },
+	}
+	actuaryRepo := &mockActuaryProfileRepo{
+		findByEmployeeIDFn: func(employeeID uint) (*models.ActuaryProfile, error) {
+			switch employeeID {
+			case 1:
+				limit := 150000.0
+				return &models.ActuaryProfile{
+					EmployeeID:   employeeID,
+					Limit:        &limit,
+					UsedLimit:    35000,
+					NeedApproval: true,
+				}, nil
+			case 2:
+				return &models.ActuaryProfile{
+					EmployeeID:   employeeID,
+					Limit:        nil,
+					UsedLimit:    0,
+					NeedApproval: false,
+				}, nil
+			default:
+				return nil, nil
+			}
+		},
+	}
+
+	cfg := &config.Config{FrontendURL: "http://localhost:5173"}
+	svc := service.NewEmployeeServiceWithRepos(cfg, empRepo, actuaryRepo, &mockPermRepo{}, &mockTokenRepo{}, nil)
+
+	items, err := svc.ListActuaryStates()
+	if err != nil {
+		t.Fatalf("ListActuaryStates() unexpected error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 actuaries, got %d", len(items))
+	}
+	if !items[0].IsSupervisor {
+		t.Fatalf("expected supervisor to be listed first, got %+v", items[0])
+	}
+	if items[1].Limit == nil || *items[1].Limit != 150000 {
+		t.Fatalf("expected agent limit to be preserved, got %+v", items[1])
 	}
 }

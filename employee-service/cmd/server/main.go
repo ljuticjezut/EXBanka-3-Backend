@@ -44,7 +44,9 @@ func main() {
 	}
 
 	notifSvc := infrasvc.NewNotificationService(cfg)
-	employeeH := handler.NewEmployeeHandler(cfg, db, notifSvc)
+	employeeSvc := infrasvc.NewEmployeeService(cfg, db, notifSvc)
+	employeeH := handler.NewEmployeeHandlerWithService(employeeSvc)
+	actuaryHTTPHandler := handler.NewActuaryHTTPHandler(cfg, employeeSvc)
 
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
@@ -82,6 +84,7 @@ func main() {
 
 	httpMux := http.NewServeMux()
 	httpMux.HandleFunc("/health", healthCheck)
+	httpMux.Handle("/api/v1/actuaries", middleware.CORS(http.HandlerFunc(actuaryHTTPHandler.ListActuaries)))
 	httpMux.Handle("/", middleware.CORS(gwMux))
 
 	httpServer := &http.Server{

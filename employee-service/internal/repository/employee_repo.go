@@ -41,6 +41,17 @@ func (r *EmployeeRepository) FindByEmail(email string) (*models.Employee, error)
 	return &emp, nil
 }
 
+func (r *EmployeeRepository) ListAll() ([]models.Employee, error) {
+	var employees []models.Employee
+	err := r.db.
+		Model(&models.Employee{}).
+		Preload("Permissions").
+		Order("prezime ASC").
+		Order("ime ASC").
+		Find(&employees).Error
+	return employees, err
+}
+
 func (r *EmployeeRepository) FindByUsername(username string) (*models.Employee, error) {
 	var emp models.Employee
 	if err := r.db.Preload("Permissions").Where("username = ?", username).First(&emp).Error; err != nil {

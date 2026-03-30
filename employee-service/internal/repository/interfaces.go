@@ -7,6 +7,7 @@ type EmployeeRepositoryInterface interface {
 	Create(emp *models.Employee) error
 	FindByID(id uint) (*models.Employee, error)
 	FindByEmail(email string) (*models.Employee, error)
+	ListAll() ([]models.Employee, error)
 	List(filter EmployeeFilter) ([]models.Employee, int64, error)
 	Update(emp *models.Employee) error
 	UpdateFields(id uint, fields map[string]interface{}) error
@@ -28,6 +29,13 @@ type TokenRepositoryInterface interface {
 	InvalidateEmployeeTokens(employeeID uint, tokenType string) error
 }
 
+type ActuaryProfileRepositoryInterface interface {
+	FindByEmployeeID(employeeID uint) (*models.ActuaryProfile, error)
+	Upsert(profile *models.ActuaryProfile) error
+	DeleteByEmployeeID(employeeID uint) error
+}
+
 var _ EmployeeRepositoryInterface = (*EmployeeRepository)(nil)
 var _ PermissionRepositoryInterface = (*PermissionRepository)(nil)
 var _ TokenRepositoryInterface = (*TokenRepository)(nil)
+var _ ActuaryProfileRepositoryInterface = (*ActuaryProfileRepository)(nil)

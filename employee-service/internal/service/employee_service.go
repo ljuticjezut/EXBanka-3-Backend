@@ -16,6 +16,7 @@ import (
 type EmployeeService struct {
 	cfg          *config.Config
 	employeeRepo repository.EmployeeRepositoryInterface
+	actuaryRepo  repository.ActuaryProfileRepositoryInterface
 	permRepo     repository.PermissionRepositoryInterface
 	tokenRepo    repository.TokenRepositoryInterface
 	notifSvc     *NotificationService
@@ -25,6 +26,7 @@ func NewEmployeeService(cfg *config.Config, db *gorm.DB, notifSvc *NotificationS
 	return &EmployeeService{
 		cfg:          cfg,
 		employeeRepo: repository.NewEmployeeRepository(db),
+		actuaryRepo:  repository.NewActuaryProfileRepository(db),
 		permRepo:     repository.NewPermissionRepository(db),
 		tokenRepo:    repository.NewTokenRepository(db),
 		notifSvc:     notifSvc,
@@ -33,10 +35,11 @@ func NewEmployeeService(cfg *config.Config, db *gorm.DB, notifSvc *NotificationS
 
 // NewEmployeeServiceWithRepos constructs an EmployeeService with injected repository interfaces,
 // allowing mock implementations to be used in unit tests.
-func NewEmployeeServiceWithRepos(cfg *config.Config, empRepo repository.EmployeeRepositoryInterface, permRepo repository.PermissionRepositoryInterface, tokRepo repository.TokenRepositoryInterface, notifSvc *NotificationService) *EmployeeService {
+func NewEmployeeServiceWithRepos(cfg *config.Config, empRepo repository.EmployeeRepositoryInterface, actuaryRepo repository.ActuaryProfileRepositoryInterface, permRepo repository.PermissionRepositoryInterface, tokRepo repository.TokenRepositoryInterface, notifSvc *NotificationService) *EmployeeService {
 	return &EmployeeService{
 		cfg:          cfg,
 		employeeRepo: empRepo,
+		actuaryRepo:  actuaryRepo,
 		permRepo:     permRepo,
 		tokenRepo:    tokRepo,
 		notifSvc:     notifSvc,
@@ -241,6 +244,13 @@ func (s *EmployeeService) UpdateEmployeePermissions(id uint, permissionNames []s
 		return nil, err
 	}
 
+	updated, err := s.employeeRepo.FindByID(id)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.syncActuaryProfile(updated); err != nil {
+		return nil, err
+	}
 	return s.employeeRepo.FindByID(id)
 }
 

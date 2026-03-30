@@ -20,10 +20,12 @@ type EmployeeHandler struct {
 	svc *svc.EmployeeService
 }
 
+func NewEmployeeHandlerWithService(svc *svc.EmployeeService) *EmployeeHandler {
+	return &EmployeeHandler{svc: svc}
+}
+
 func NewEmployeeHandler(cfg *config.Config, db *gorm.DB, notifSvc *svc.NotificationService) *EmployeeHandler {
-	return &EmployeeHandler{
-		svc: svc.NewEmployeeService(cfg, db, notifSvc),
-	}
+	return NewEmployeeHandlerWithService(svc.NewEmployeeService(cfg, db, notifSvc))
 }
 
 func toEmployeeProto(emp *models.Employee) *employeev1.EmployeeProto {

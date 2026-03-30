@@ -32,10 +32,15 @@ func Migrate(db *gorm.DB) error {
 	slog.Info("Running employee-service database migrations...")
 	if err := db.AutoMigrate(
 		&models.Employee{},
+		&models.ActuaryProfile{},
 		&models.Permission{},
 		&models.Token{},
 	); err != nil {
 		return fmt.Errorf("migration failed: %w", err)
+	}
+
+	if err := BackfillActuaryProfiles(db); err != nil {
+		return fmt.Errorf("actuary profile backfill failed: %w", err)
 	}
 
 	slog.Info("Employee-service migrations complete")

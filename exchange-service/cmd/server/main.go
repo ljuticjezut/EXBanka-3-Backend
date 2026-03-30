@@ -12,8 +12,12 @@ import (
 
 	exchangev1 "github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/gen/proto/exchange/v1"
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/config"
+	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/database"
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/handler"
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/middleware"
+	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/provider"
+	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/repository"
+	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/service"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -25,7 +29,25 @@ func main() {
 
 	cfg := config.Load()
 
+	db, err := database.Connect(cfg)
+	if err != nil {
+		slog.Error("DB connection failed", "error", err)
+		os.Exit(1)
+	}
+	if err := database.Migrate(db); err != nil {
+		slog.Error("DB migration failed", "error", err)
+		os.Exit(1)
+	}
+	if err := database.SeedMarketData(db); err != nil {
+		slog.Error("Market seed failed", "error", err)
+		os.Exit(1)
+	}
+
 	exchangeH := handler.NewExchangeHandler()
+	marketRepo := repository.NewMarketRepository(db)
+	marketProvider := provider.NewDatabaseMarketProvider(marketRepo)
+	marketSvc := service.NewMarketService(marketProvider)
+	marketH := handler.NewMarketHTTPHandler(cfg, marketSvc)
 
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
@@ -63,6 +85,10 @@ func main() {
 
 	httpMux := http.NewServeMux()
 	httpMux.HandleFunc("/health", healthCheck)
+	httpMux.Handle("/api/v1/exchanges", middleware.CORS(http.HandlerFunc(marketH.ListExchanges)))
+	httpMux.Handle("/api/v1/listings", middleware.CORS(http.HandlerFunc(marketH.ListListings)))
+	httpMux.Handle("/api/v1/listings/", middleware.CORS(http.HandlerFunc(marketH.ListingRoutes)))
+	httpMux.Handle("/api/v1/portfolio", middleware.CORS(http.HandlerFunc(marketH.GetPortfolio)))
 	httpMux.Handle("/", middleware.CORS(gwMux))
 
 	httpServer := &http.Server{
