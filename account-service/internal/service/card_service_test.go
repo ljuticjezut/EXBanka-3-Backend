@@ -25,6 +25,7 @@ func (m *mockCardRepo) CountByAccountID(_ uint) (int64, error) {
 func (m *mockCardRepo) CountByClientAndAccount(_, _ uint) (int64, error) {
 	return m.countByClientAcct, nil
 }
+func (m *mockCardRepo) CountByOvlascenoLice(_ uint) (int64, error)    { return 0, nil }
 func (m *mockCardRepo) ListByAccountID(_ uint) ([]models.Card, error) { return nil, nil }
 func (m *mockCardRepo) ListByClientID(_ uint) ([]models.Card, error)  { return nil, nil }
 func (m *mockCardRepo) Save(c *models.Card) error                     { m.saved = c; return nil }
@@ -196,8 +197,10 @@ func TestCreateCard_PoslovniAccount_SecondCardForSameClientRejected(t *testing.T
 func TestCreateCard_PoslovniAccount_SetsAuthorizedPersonWhenDifferentFromOwner(t *testing.T) {
 	cr := &mockCardRepo{}
 	svc := newCardSvc(cr, &mockAcctRepoForCard{account: poslovniAccount()})
+	ovlascenoLiceID := uint(77)
 	card, err := svc.CreateCard(service.CreateCardInput{
 		AccountID: 2, ClientID: 77, VrstaKartice: "visa",
+		OvlascenoLiceID: &ovlascenoLiceID,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

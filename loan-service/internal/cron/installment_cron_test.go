@@ -220,7 +220,7 @@ func TestInstallmentCollector_InsufficientFunds_MarkedKasni(t *testing.T) {
 
 func TestInterestRateUpdater_NoLoans_DoesNothing(t *testing.T) {
 	lrepo := &mockLoanRepo{loans: nil}
-	u := cron.NewInterestRateUpdater(lrepo)
+	u := cron.NewInterestRateUpdater(lrepo, nil)
 	if err := u.Run(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestInterestRateUpdater_VariableLoan_RateUpdated(t *testing.T) {
 		Iznos: 120000, Period: 12, IznosRate: 10250,
 	}
 	lrepo := &mockLoanRepo{loans: []models.Loan{loan}}
-	u := cron.NewInterestRateUpdater(lrepo)
+	u := cron.NewInterestRateUpdater(lrepo, nil)
 	u.Run()
 	if len(lrepo.saved) != 1 {
 		t.Fatalf("expected 1 save, got %d", len(lrepo.saved))
@@ -254,7 +254,7 @@ func TestInterestRateUpdater_VariableLoan_IznosRateRecalculated(t *testing.T) {
 		Iznos: 120000, Period: 24, IznosRate: 5320,
 	}
 	lrepo := &mockLoanRepo{loans: []models.Loan{loan}}
-	u := cron.NewInterestRateUpdater(lrepo)
+	u := cron.NewInterestRateUpdater(lrepo, nil)
 	u.Run()
 	// IznosRate must be recalculated (should differ from original if rate changed)
 	// At minimum, it must be positive
@@ -269,7 +269,7 @@ func TestInterestRateUpdater_RateCannotGoBelowZero(t *testing.T) {
 		Iznos: 10000, Period: 6, IznosRate: 1700,
 	}
 	lrepo := &mockLoanRepo{loans: []models.Loan{loan}}
-	u := cron.NewInterestRateUpdater(lrepo)
+	u := cron.NewInterestRateUpdater(lrepo, nil)
 	for range 20 { // run many times to test floor
 		lrepo.saved = nil
 		lrepo.loans[0].KamatnaStopa = loan.KamatnaStopa

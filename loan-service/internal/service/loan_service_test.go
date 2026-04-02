@@ -211,7 +211,8 @@ func TestRequestLoan_CreatesWithStatusZahtev(t *testing.T) {
 	loan, err := svc.RequestLoan(service.CreateLoanInput{
 		Vrsta: "gotovinski", BrojRacuna: "160000000000000002",
 		Iznos: 100000, Period: 12, TipKamate: "fiksna",
-		ClientID: 1, CurrencyID: 1,
+		ClientID: 1, CurrencyID: 1, SvrhaKredita: "test", IznosMesecnePlate: 50000,
+		StatusZaposlenja: "stalno", PeriodZaposlenja: "5 godina", KontaktTelefon: "0611234567",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -229,7 +230,8 @@ func TestRequestLoan_CalculatesIznosRate(t *testing.T) {
 	_, err := svc.RequestLoan(service.CreateLoanInput{
 		Vrsta: "gotovinski", BrojRacuna: "160000000000000002",
 		Iznos: 100000, Period: 12, TipKamate: "fiksna",
-		ClientID: 1, CurrencyID: 1,
+		ClientID: 1, CurrencyID: 1, SvrhaKredita: "test", IznosMesecnePlate: 50000,
+		StatusZaposlenja: "stalno", PeriodZaposlenja: "5 godina", KontaktTelefon: "0611234567",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -244,7 +246,8 @@ func TestRequestLoan_GeneratesBrojKredita(t *testing.T) {
 	_, err := svc.RequestLoan(service.CreateLoanInput{
 		Vrsta: "stambeni", BrojRacuna: "160000000000000002",
 		Iznos: 500000, Period: 120, TipKamate: "varijabilna",
-		ClientID: 1, CurrencyID: 1,
+		ClientID: 1, CurrencyID: 1, SvrhaKredita: "test", IznosMesecnePlate: 50000,
+		StatusZaposlenja: "stalno", PeriodZaposlenja: "5 godina", KontaktTelefon: "0611234567",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

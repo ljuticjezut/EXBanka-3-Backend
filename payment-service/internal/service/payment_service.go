@@ -170,6 +170,16 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*models.Paymen
 		return nil, fmt.Errorf("failed to create payment: %w", err)
 	}
 
+	if s.notifier != nil && strings.TrimSpace(input.ClientEmail) != "" {
+		if err := s.notifier.SendVerificationCode(
+			input.ClientEmail, input.ClientName, code,
+			input.Iznos, input.Svrha, input.RacunPrimaocaBroj,
+		); err != nil {
+			s.cancelPayment(payment)
+			return nil, fmt.Errorf("failed to send verification code: %w", err)
+		}
+	}
+
 	return payment, nil
 }
 

@@ -37,10 +37,25 @@ func (m *mockCardSvc) ListByClient(_ uint) ([]models.Card, error) {
 func (m *mockCardSvc) BlockCard(_, _ uint) (*models.Card, error) {
 	return m.foundCard, m.err
 }
+func (m *mockCardSvc) BlockCardWithNotify(_, _ uint, _ *service.CardStatusNotifyInfo) (*models.Card, error) {
+	return m.foundCard, m.err
+}
 func (m *mockCardSvc) UnblockCard(_ uint) (*models.Card, error) {
 	return m.foundCard, m.err
 }
+func (m *mockCardSvc) UnblockCardWithNotify(_ uint, _ *service.CardStatusNotifyInfo) (*models.Card, error) {
+	return m.foundCard, m.err
+}
 func (m *mockCardSvc) DeactivateCard(_ uint) (*models.Card, error) {
+	return m.foundCard, m.err
+}
+func (m *mockCardSvc) DeactivateCardWithNotify(_ uint, _ *service.CardStatusNotifyInfo) (*models.Card, error) {
+	return m.foundCard, m.err
+}
+func (m *mockCardSvc) RequestCardClient(_ service.ClientCardRequestInput) (*models.CardRequest, error) {
+	return nil, m.err
+}
+func (m *mockCardSvc) VerifyCardRequest(_ uint, _ string) (*models.Card, error) {
 	return m.foundCard, m.err
 }
 
