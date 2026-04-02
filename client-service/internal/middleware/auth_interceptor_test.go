@@ -53,7 +53,7 @@ func callInterceptor(t *testing.T, cfg *config.Config, method, token string) err
 
 func TestAuthInterceptor_EmployeeJWT_PassesForAdminEndpoint(t *testing.T) {
 	cfg := newTestConfig()
-	tok := employeeToken(t, []string{models.PermAdmin})
+	tok := employeeToken(t, []string{models.PermEmployeeAdmin})
 	err := callInterceptor(t, cfg, "/client.v1.ClientService/GetClient", tok)
 	if err != nil {
 		t.Errorf("expected no error for admin employee token, got %v", err)
@@ -84,7 +84,7 @@ func TestAuthInterceptor_ClientJWT_RejectedForAdminOnlyEndpoint(t *testing.T) {
 
 func TestAuthInterceptor_ExpiredToken_Rejected(t *testing.T) {
 	cfg := newTestConfig()
-	expired, err := util.GenerateAccessToken(1, "admin@bank.com", "admin", []string{models.PermAdmin}, testSecret, -1)
+	expired, err := util.GenerateAccessToken(1, "admin@bank.com", "admin", []string{models.PermEmployeeAdmin}, testSecret, -1)
 	if err != nil {
 		t.Fatalf("generate expired token: %v", err)
 	}

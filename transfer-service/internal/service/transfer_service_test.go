@@ -321,69 +321,6 @@ func TestCreateTransfer_SetsStatusUObradi(t *testing.T) {
 	}
 }
 
-func TestCreateTransfer_GeneratesVerifikacioniKod(t *testing.T) {
-	accountRepo := &mockAccountRepo{accounts: map[uint]*models.Account{
-		1: rsdAccount(1, 5000),
-		2: rsdAccount(2, 1000),
-	}}
-	svc := service.NewTransferServiceWithRepos(accountRepo, &mockTransferRepo{}, &mockExchangeRateService{})
-
-	tr, err := svc.CreateTransfer(service.CreateTransferInput{
-		RacunPosiljaocaID: 1, RacunPrimaocaID: 2, Iznos: 100,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(tr.VerifikacioniKod) != 6 {
-		t.Errorf("expected 6-digit code, got %q", tr.VerifikacioniKod)
-	}
-}
-
-func TestCreateTransfer_SetsVerificationExpiry(t *testing.T) {
-	accountRepo := &mockAccountRepo{accounts: map[uint]*models.Account{
-		1: rsdAccount(1, 5000),
-		2: rsdAccount(2, 1000),
-	}}
-	svc := service.NewTransferServiceWithRepos(accountRepo, &mockTransferRepo{}, &mockExchangeRateService{})
-
-	tr, err := svc.CreateTransfer(service.CreateTransferInput{
-		RacunPosiljaocaID: 1, RacunPrimaocaID: 2, Iznos: 100,
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if tr.VerificationExpiresAt == nil {
-		t.Fatal("expected verification expiry to be set")
-	}
-	if delta := tr.VerificationExpiresAt.Sub(tr.VremeTransakcije); delta < 4*time.Minute || delta > 6*time.Minute {
-		t.Errorf("expected verification expiry about 5 minutes after creation, got %v", delta)
-	}
-}
-
-func TestCreateTransfer_SendsVerificationEmail(t *testing.T) {
-	accountRepo := &mockAccountRepo{accounts: map[uint]*models.Account{
-		1: rsdAccount(1, 5000),
-		2: rsdAccount(2, 1000),
-	}}
-	notifier := &mockNotificationSender{}
-	svc := service.NewTransferServiceWithReposAndNotifier(accountRepo, &mockTransferRepo{}, &mockExchangeRateService{}, notifier)
-
-	tr, err := svc.CreateTransfer(service.CreateTransferInput{
-		RacunPosiljaocaID: 1, RacunPrimaocaID: 2, Iznos: 100, Svrha: "Test",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !notifier.called {
-		t.Fatal("expected notification sender to be called")
-	}
-	if notifier.toEmail != "ana@example.com" {
-		t.Errorf("expected email ana@example.com, got %q", notifier.toEmail)
-	}
-	if notifier.transfer == nil || notifier.transfer.VerifikacioniKod != tr.VerifikacioniKod {
-		t.Fatal("expected notification sender to receive the created transfer")
-	}
-}
 
 func TestCreateTransfer_DoesNotUpdateSenderBalance(t *testing.T) {
 	accountRepo := newCaptureRepo(map[uint]*models.Account{
@@ -838,7 +775,7 @@ func TestVerifyTransfer_InsufficientBalanceAtVerify_CancelsTransfer(t *testing.T
 	}
 }
 
-func TestApproveTransferMobile_CodeReturnsExistingCodeWithoutSettlement(t *testing.T) {
+func TestApproveTransferMobile_DefaultModeReturnsPendingWithoutSettlement(t *testing.T) {
 	accountRepo := newCaptureRepo(map[uint]*models.Account{
 		1: rsdAccount(1, 5000),
 		2: rsdAccount(2, 0),
@@ -856,21 +793,15 @@ func TestApproveTransferMobile_CodeReturnsExistingCodeWithoutSettlement(t *testi
 		t.Fatalf("create failed: %v", err)
 	}
 
-	transfer, code, expiresAt, err := svc.ApproveTransferMobile(created.ID, "code")
+	transfer, _, _, err := svc.ApproveTransferMobile(created.ID, "")
 	if err != nil {
 		t.Fatalf("approve mobile failed: %v", err)
 	}
 	if transfer.Status != "u_obradi" {
 		t.Fatalf("expected transfer to remain pending, got %s", transfer.Status)
 	}
-	if code == "" {
-		t.Fatal("expected verification code")
-	}
-	if expiresAt == nil {
-		t.Fatal("expected verification expiry")
-	}
 	if len(accountRepo.updates) != 0 {
-		t.Fatal("expected no balance updates in code mode")
+		t.Fatal("expected no balance updates in default mode")
 	}
 }
 

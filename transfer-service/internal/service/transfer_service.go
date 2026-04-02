@@ -131,7 +131,7 @@ func (s *TransferService) PreviewTransfer(input CreateTransferInput) (*TransferP
 }
 
 func (s *TransferService) CreateTransfer(input CreateTransferInput) (*models.Transfer, error) {
-	preview, sender, receiver, err := s.prepareTransfer(input)
+	preview, _, _, err := s.prepareTransfer(input)
 	if err != nil {
 		return nil, err
 	}
@@ -151,52 +151,6 @@ func (s *TransferService) CreateTransfer(input CreateTransferInput) (*models.Tra
 	}
 
 	if err := s.transferRepo.Create(transfer); err != nil {
-		return nil, fmt.Errorf("failed to save transfer: %w", err)
-	}
-
-	ukupnoZaSkidanje := transfer.Iznos + transfer.Provizija
-	if err := s.accountRepo.UpdateFields(sender.ID, map[string]interface{}{
-		"stanje":             sender.Stanje - ukupnoZaSkidanje,
-		"raspolozivo_stanje": sender.RaspolozivoStanje - ukupnoZaSkidanje,
-		"dnevna_potrosnja":   sender.DnevnaPotrosnja + transfer.Iznos,
-		"mesecna_potrosnja":  sender.MesecnaPotrosnja + transfer.Iznos,
-	}); err != nil {
-		return nil, fmt.Errorf("failed to update sender balance: %w", err)
-	}
-
-	if sender.CurrencyID != receiver.CurrencyID {
-		bankFrom, err := s.accountRepo.FindBankAccountByCurrency(sender.Currency.Kod)
-		if err != nil {
-			return nil, fmt.Errorf("bank account for currency %s not found: %w", sender.Currency.Kod, err)
-		}
-		bankTo, err := s.accountRepo.FindBankAccountByCurrency(receiver.Currency.Kod)
-		if err != nil {
-			return nil, fmt.Errorf("bank account for currency %s not found: %w", receiver.Currency.Kod, err)
-		}
-		if err := s.accountRepo.UpdateFields(bankFrom.ID, map[string]interface{}{
-			"stanje":             bankFrom.Stanje + ukupnoZaSkidanje,
-			"raspolozivo_stanje": bankFrom.RaspolozivoStanje + ukupnoZaSkidanje,
-		}); err != nil {
-			return nil, fmt.Errorf("failed to update bank from-currency account: %w", err)
-		}
-		if err := s.accountRepo.UpdateFields(bankTo.ID, map[string]interface{}{
-			"stanje":             bankTo.Stanje - transfer.KonvertovaniIznos,
-			"raspolozivo_stanje": bankTo.RaspolozivoStanje - transfer.KonvertovaniIznos,
-		}); err != nil {
-			return nil, fmt.Errorf("failed to update bank to-currency account: %w", err)
-		}
-	}
-
-	if err := s.accountRepo.UpdateFields(receiver.ID, map[string]interface{}{
-		"stanje":             receiver.Stanje + transfer.KonvertovaniIznos,
-		"raspolozivo_stanje": receiver.RaspolozivoStanje + transfer.KonvertovaniIznos,
-	}); err != nil {
-		return nil, fmt.Errorf("failed to update receiver balance: %w", err)
-	}
-
-	transfer.Status = transferStatusCompleted
-	transfer.VremeTransakcije = time.Now().UTC()
-	if err := s.transferRepo.Save(transfer); err != nil {
 		return nil, fmt.Errorf("failed to save transfer: %w", err)
 	}
 
@@ -482,27 +436,25 @@ func (s *TransferService) settleTransferNonTx(transfer *models.Transfer) (*model
 }
 
 func (s *TransferService) ApproveTransferMobile(transferID uint, mode string) (*models.Transfer, string, *time.Time, error) {
-	transfer, expiresAt, err := s.pendingTransferForMobile(transferID)
+	transfer, err := s.pendingTransferForMobile(transferID)
 	if err != nil {
 		return nil, "", nil, err
 	}
 
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", "code":
-		return transfer, transfer.VerifikacioniKod, &expiresAt, nil
 	case "confirm":
-		approved, err := s.VerifyTransfer(transferID, transfer.VerifikacioniKod)
+		approved, err := s.settleTransfer(transfer)
 		if err != nil {
 			return nil, "", nil, err
 		}
 		return approved, "", nil, nil
 	default:
-		return nil, "", nil, fmt.Errorf("unsupported approval mode")
+		return transfer, "", nil, nil
 	}
 }
 
 func (s *TransferService) RejectTransfer(transferID uint) (*models.Transfer, error) {
-	transfer, _, err := s.pendingTransferForMobile(transferID)
+	transfer, err := s.pendingTransferForMobile(transferID)
 	if err != nil {
 		return nil, err
 	}
@@ -621,42 +573,21 @@ func (s *TransferService) sendVerificationCode(sender *models.Account, transfer 
 	return nil
 }
 
-func (s *TransferService) pendingTransferForMobile(transferID uint) (*models.Transfer, time.Time, error) {
+func (s *TransferService) pendingTransferForMobile(transferID uint) (*models.Transfer, error) {
 	transfer, err := s.transferRepo.FindByID(transferID)
 	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("transfer not found: %w", err)
+		return nil, fmt.Errorf("transfer not found: %w", err)
 	}
 
 	if transfer.Status != transferStatusPending {
-		return nil, time.Time{}, &TransferVerificationError{
+		return nil, &TransferVerificationError{
 			Code:    "transfer_not_pending",
 			Message: fmt.Sprintf("transfer is not pending: status=%s", transfer.Status),
 			Status:  transfer.Status,
 		}
 	}
 
-	expiresAt := transfer.CreatedAt.Add(verificationCodeTTL)
-	if transfer.VerificationExpiresAt != nil {
-		expiresAt = transfer.VerificationExpiresAt.UTC()
-	}
-	if time.Now().UTC().After(expiresAt) {
-		s.cancelTransfer(transfer)
-		return nil, expiresAt, &TransferVerificationError{
-			Code:    "verification_code_expired",
-			Message: "verification code expired",
-			Status:  transferStatusCancelled,
-		}
-	}
-
-	if strings.TrimSpace(transfer.VerifikacioniKod) == "" {
-		return nil, expiresAt, &TransferVerificationError{
-			Code:    "verification_code_unavailable",
-			Message: "verification code is unavailable",
-			Status:  transfer.Status,
-		}
-	}
-
-	return transfer, expiresAt, nil
+	return transfer, nil
 }
 
 func (s *TransferService) cancelTransfer(transfer *models.Transfer) {
