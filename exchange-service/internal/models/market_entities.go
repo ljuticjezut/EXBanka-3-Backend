@@ -208,3 +208,39 @@ type OrderTransactionRecord struct {
 }
 
 func (OrderTransactionRecord) TableName() string { return "order_transactions" }
+
+// Portfolio holdings — persistent, built from executed order transactions.
+
+type PortfolioHoldingRecord struct {
+	ID             uint                `gorm:"primaryKey"`
+	UserID         uint                `gorm:"column:user_id;not null;index:idx_portfolio_user_asset"`
+	UserType       string              `gorm:"column:user_type;not null"` // "client" or "employee"
+	AssetID        uint                `gorm:"column:asset_id;not null;index:idx_portfolio_user_asset"`
+	Asset          MarketListingRecord `gorm:"foreignKey:AssetID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT;"`
+	Quantity       float64             `gorm:"not null;default:0"`
+	AvgBuyPrice    float64             `gorm:"column:avg_buy_price;not null;default:0"`
+	IsPublic       bool                `gorm:"column:is_public;not null;default:false"`
+	AccountID      uint                `gorm:"column:account_id;not null"`
+	RealizedProfit float64             `gorm:"column:realized_profit;not null;default:0"`
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+func (PortfolioHoldingRecord) TableName() string { return "portfolio_holdings" }
+
+// TaxRecord tracks capital gains tax (15%) owed per user per month.
+
+type TaxRecord struct {
+	ID        uint      `gorm:"primaryKey"`
+	UserID    uint      `gorm:"column:user_id;not null;index:idx_tax_user_period"`
+	UserType  string    `gorm:"column:user_type;not null"`
+	AssetID   uint      `gorm:"column:asset_id;not null"`
+	Period    string    `gorm:"not null;index:idx_tax_user_period"` // "YYYY-MM", e.g. "2026-04"
+	ProfitRSD float64   `gorm:"column:profit_rsd;not null"`
+	TaxRSD    float64   `gorm:"column:tax_rsd;not null"` // 15% of profit_rsd
+	Status    string    `gorm:"not null;default:'unpaid'"` // unpaid, paid
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+func (TaxRecord) TableName() string { return "tax_records" }
