@@ -14,12 +14,13 @@ const afterHoursDelay = 30 * time.Minute
 
 // OrderExecutor fills active orders on each cron tick.
 type OrderExecutor struct {
-	orderRepo  *repository.OrderRepository
-	marketRepo *repository.MarketRepository
+	orderRepo     *repository.OrderRepository
+	marketRepo    *repository.MarketRepository
+	portfolioSvc  *PortfolioService
 }
 
-func NewOrderExecutor(orderRepo *repository.OrderRepository, marketRepo *repository.MarketRepository) *OrderExecutor {
-	return &OrderExecutor{orderRepo: orderRepo, marketRepo: marketRepo}
+func NewOrderExecutor(orderRepo *repository.OrderRepository, marketRepo *repository.MarketRepository, portfolioSvc *PortfolioService) *OrderExecutor {
+	return &OrderExecutor{orderRepo: orderRepo, marketRepo: marketRepo, portfolioSvc: portfolioSvc}
 }
 
 // Run processes all approved, not-done orders and partially or fully fills them
@@ -69,6 +70,12 @@ func (e *OrderExecutor) Run() {
 		if err := e.orderRepo.DecrementRemainingPortions(order.ID, fillQty); err != nil {
 			slog.Error("order executor: failed to decrement portions", "orderID", order.ID, "error", err)
 			continue
+		}
+
+		// Update portfolio holdings to reflect the fill.
+		if err := e.portfolioSvc.RecordFill(&order, fillQty, price); err != nil {
+			slog.Error("order executor: failed to update portfolio", "orderID", order.ID, "error", err)
+			// Non-fatal: order fill is committed; portfolio can be reconciled later.
 		}
 
 		slog.Info("order executor: filled",
