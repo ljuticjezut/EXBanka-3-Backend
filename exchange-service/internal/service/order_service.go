@@ -85,6 +85,16 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 	// Commission depends on order type.
 	commission := calcCommission(input.OrderType, totalPrice)
 
+	// Margin orders: verify the account has enough available balance to cover
+	// the Initial Margin Cost before accepting the order.
+	// MaintenanceMargin = contractSize * pricePerUnit * 10%
+	// InitialMarginCost = MaintenanceMargin * 1.1
+	if input.IsMargin {
+		if err := s.validateMargin(input.AccountID, contractSize, pricePerUnit); err != nil {
+			return nil, err
+		}
+	}
+
 	// Determine initial order status.
 	status, needsApproval, err := s.resolveStatus(input, totalPrice)
 	if err != nil {
@@ -276,6 +286,24 @@ func orderPricePerUnit(listing *models.MarketListingRecord, input CreateOrderInp
 		}
 		return listing.Bid
 	}
+}
+
+// validateMargin checks that the account's available balance covers the
+// Initial Margin Cost for a margin order.
+//
+//	MaintenanceMargin = contractSize * pricePerUnit * 10%
+//	InitialMarginCost = MaintenanceMargin * 1.1
+func (s *OrderService) validateMargin(accountID uint, contractSize int64, pricePerUnit float64) error {
+	balance, _, err := s.orderRepo.GetAccountBalance(accountID)
+	if err != nil {
+		return fmt.Errorf("failed to read account balance: %w", err)
+	}
+	maintenanceMargin := float64(contractSize) * pricePerUnit * 0.10
+	imc := maintenanceMargin * 1.1
+	if balance < imc {
+		return fmt.Errorf("insufficient balance for margin order: need %.2f, have %.2f", imc, balance)
+	}
+	return nil
 }
 
 // calcCommission computes the commission for an order.
