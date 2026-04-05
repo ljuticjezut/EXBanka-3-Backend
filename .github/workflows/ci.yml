@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - auth-service
+          - employee-service
+          - client-service
+          - account-service
+          - transfer-service
+          - payment-service
+          - exchange-service
+          - loan-service
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.service }}/go.mod
+          cache-dependency-path: ${{ matrix.service }}/go.sum
+
+      - name: go mod tidy check
+        working-directory: ${{ matrix.service }}
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: gofmt check
+        working-directory: ${{ matrix.service }}
+        run: |
+          output=$(gofmt -l .)
+          if [ -n "$output" ]; then
+            echo "Files not formatted with gofmt:"
+            echo "$output"
+            exit 1
+          fi
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          working-directory: ${{ matrix.service }}
+          version: latest
+
+  build-and-test:
+    name: Build & Test (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - auth-service
+          - employee-service
+          - client-service
+          - account-service
+          - transfer-service
+          - payment-service
+          - exchange-service
+          - loan-service
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.service }}/go.mod
+          cache-dependency-path: ${{ matrix.service }}/go.sum
+
+      - name: Build
+        working-directory: ${{ matrix.service }}
+        run: go build ./cmd/server
+
+      - name: Test
+        working-directory: ${{ matrix.service }}
+        run: go test ./...
+
+      - name: Docker build (no push)
+        run: |
+          docker build -f ${{ matrix.service }}/Dockerfile ${{ matrix.service }}/
