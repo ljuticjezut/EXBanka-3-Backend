@@ -57,8 +57,9 @@ type CreateOrderResult struct {
 }
 
 // CreateOrder validates input and persists a new order.
-// For Task 2.1 this handles market orders; limit/stop types are validated and persisted
-// but their execution conditions are evaluated by the cron executor (Phase 3).
+// Market orders use current ask/bid. Limit orders use limit_value (or better if
+// conditions are already met). Stop/stop-limit conditions are evaluated by the
+// cron executor (Phase 3).
 func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, error) {
 	if err := validateOrderInput(input); err != nil {
 		return nil, err
@@ -75,8 +76,8 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 		return nil, fmt.Errorf("asset not found: %s", input.AssetTicker)
 	}
 
-	// Determine execution price per unit based on direction.
-	pricePerUnit := executionPrice(listing, input.Direction)
+	// Determine price per unit based on order type and current market.
+	pricePerUnit := orderPricePerUnit(listing, input)
 
 	// Total order value (before commission).
 	totalPrice := round2(float64(contractSize) * pricePerUnit * float64(input.Quantity))
@@ -229,13 +230,35 @@ func validateOrderInput(input CreateOrderInput) error {
 	return nil
 }
 
-// executionPrice returns the execution price per unit for a market order.
-// Buy fills at ask; sell fills at bid.
-func executionPrice(listing *models.MarketListingRecord, direction string) float64 {
-	if direction == "buy" {
-		return listing.Ask
+// orderPricePerUnit determines the price per unit to record on the order.
+//
+// Market: buy fills at ask, sell fills at bid.
+//
+// Limit: use the better of the limit price and the current market price if the
+// condition is already satisfied at placement time, otherwise fall back to
+// limit_value (worst-case committed price used for commission + limit checks).
+//   - Buy limit:  condition = ask <= limit_value  → fill price = ask
+//   - Sell limit: condition = bid >= limit_value  → fill price = bid
+//
+// Stop / stop-limit: the stop condition is evaluated by the cron executor; store
+// stop_value as the committed reference price for commission + limit checks.
+func orderPricePerUnit(listing *models.MarketListingRecord, input CreateOrderInput) float64 {
+	switch input.OrderType {
+	case "limit":
+		if input.Direction == "buy" && listing.Ask <= *input.LimitValue {
+			return listing.Ask // already satisfiable — get the better price
+		}
+		if input.Direction == "sell" && listing.Bid >= *input.LimitValue {
+			return listing.Bid // already satisfiable — get the better price
+		}
+		return *input.LimitValue // conditions not met yet; use committed limit price
+
+	default: // "market"
+		if input.Direction == "buy" {
+			return listing.Ask
+		}
+		return listing.Bid
 	}
-	return listing.Bid
 }
 
 // calcCommission computes the commission for an order.
