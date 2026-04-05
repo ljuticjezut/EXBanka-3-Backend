@@ -96,6 +96,11 @@ func (s *TaxService) SumUnpaidTax(userID uint, userType, period string) (float64
 	return s.taxRepo.SumUnpaidTaxForUser(userID, userType, period)
 }
 
+// SumPaidTaxForYear returns the total paid tax for a user in a given calendar year (e.g. "2026").
+func (s *TaxService) SumPaidTaxForYear(userID uint, userType, year string) (float64, error) {
+	return s.taxRepo.SumPaidTaxForUserYear(userID, userType, year)
+}
+
 // toRSD converts an amount from the given currency to RSD.
 // Falls back to the original amount when no forex pair is found.
 func (s *TaxService) toRSD(amount float64, currency string) float64 {
