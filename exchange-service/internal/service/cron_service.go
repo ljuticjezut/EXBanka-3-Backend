@@ -25,12 +25,15 @@ func StartCronJobs(db *gorm.DB) *cron.Cron {
 	}
 
 	// Order execution engine: attempt to fill active orders every minute.
-	portfolioSvc := NewPortfolioService(repository.NewPortfolioRepository(db), repository.NewTaxRepository(db))
-	executor := NewOrderExecutor(
-		repository.NewOrderRepository(db),
-		repository.NewMarketRepository(db),
-		portfolioSvc,
+	orderRepo := repository.NewOrderRepository(db)
+	marketRepo := repository.NewMarketRepository(db)
+	portfolioSvc := NewPortfolioService(
+		repository.NewPortfolioRepository(db),
+		repository.NewTaxRepository(db),
+		marketRepo,
+		orderRepo,
 	)
+	executor := NewOrderExecutor(orderRepo, marketRepo, portfolioSvc)
 	_, err = c.AddFunc("@every 1m", func() {
 		executor.Run()
 	})
