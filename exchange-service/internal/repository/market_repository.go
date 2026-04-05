@@ -141,6 +141,31 @@ func (r *MarketRepository) GetOptionsByStockListingID(stockListingID uint) ([]mo
 	return records, nil
 }
 
+// GetListingRecordByID returns a market listing by primary key.
+func (r *MarketRepository) GetListingRecordByID(id uint) (*models.MarketListingRecord, error) {
+	var record models.MarketListingRecord
+	if err := r.db.Preload("Exchange").First(&record, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &record, nil
+}
+
+// GetOptionByListingID returns the OptionRecord whose own listing_id matches
+// (i.e. the option contract's listing, not its underlying stock listing).
+func (r *MarketRepository) GetOptionByListingID(listingID uint) (*models.OptionRecord, error) {
+	var record models.OptionRecord
+	if err := r.db.Preload("Listing").Where("listing_id = ?", listingID).First(&record).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &record, nil
+}
+
 func (r *MarketRepository) GetListingRecordByTicker(ticker string) (*models.MarketListingRecord, error) {
 	var record models.MarketListingRecord
 	if err := r.db.Preload("Exchange").Where("ticker = ?", ticker).First(&record).Error; err != nil {

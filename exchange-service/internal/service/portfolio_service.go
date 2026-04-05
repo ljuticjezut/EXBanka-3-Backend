@@ -9,6 +9,9 @@ import (
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/repository"
 )
 
+// optionContractSize is the number of underlying shares per option contract.
+const optionContractSize = 100
+
 const capitalGainsTaxRate = 0.15
 
 // PortfolioService maintains PortfolioHoldingRecords in response to order fills
@@ -16,10 +19,22 @@ const capitalGainsTaxRate = 0.15
 type PortfolioService struct {
 	portfolioRepo *repository.PortfolioRepository
 	taxRepo       *repository.TaxRepository
+	marketRepo    *repository.MarketRepository
+	orderRepo     *repository.OrderRepository
 }
 
-func NewPortfolioService(portfolioRepo *repository.PortfolioRepository, taxRepo *repository.TaxRepository) *PortfolioService {
-	return &PortfolioService{portfolioRepo: portfolioRepo, taxRepo: taxRepo}
+func NewPortfolioService(
+	portfolioRepo *repository.PortfolioRepository,
+	taxRepo *repository.TaxRepository,
+	marketRepo *repository.MarketRepository,
+	orderRepo *repository.OrderRepository,
+) *PortfolioService {
+	return &PortfolioService{
+		portfolioRepo: portfolioRepo,
+		taxRepo:       taxRepo,
+		marketRepo:    marketRepo,
+		orderRepo:     orderRepo,
+	}
 }
 
 // HoldingWithPnL enriches a PortfolioHoldingRecord with live unrealized P&L
@@ -135,6 +150,151 @@ func (s *PortfolioService) ListHoldings(userID uint, userType string) ([]models.
 // SetPublic toggles the is_public flag on a holding.
 func (s *PortfolioService) SetPublic(holdingID uint, isPublic bool) error {
 	return s.portfolioRepo.SetHoldingPublic(holdingID, isPublic)
+}
+
+// ExerciseOption exercises an in-the-money option held in the portfolio.
+//
+// Validations:
+//   - Holding must be an option (listing type == "option")
+//   - Settlement date must not have passed
+//   - Option must be in-the-money (CALL: market > strike; PUT: market < strike)
+//
+// On exercise:
+//   - Creates a synthetic market order + transaction for the underlying stock
+//   - Updates the underlying stock holding (buy for CALL, sell for PUT) at strike price
+//   - Zeroes out the option holding quantity, adds exercise profit to realized_profit
+//   - Creates a TaxRecord if exercise profit > 0
+func (s *PortfolioService) ExerciseOption(holdingID, actuaryID uint) error {
+	// 1. Load the option holding.
+	holding, err := s.portfolioRepo.GetHoldingByID(holdingID)
+	if err != nil || holding == nil {
+		return fmt.Errorf("holding not found")
+	}
+	if holding.Asset.Type != "option" {
+		return fmt.Errorf("holding %d is not an option contract", holdingID)
+	}
+	if holding.Quantity <= 0 {
+		return fmt.Errorf("option holding has no remaining quantity")
+	}
+
+	// 2. Load the OptionRecord for strike price and underlying.
+	opt, err := s.marketRepo.GetOptionByListingID(holding.AssetID)
+	if err != nil || opt == nil {
+		return fmt.Errorf("option contract data not found for asset %d", holding.AssetID)
+	}
+
+	// 3. Validate settlement date.
+	if time.Now().After(opt.SettlementDate) {
+		return fmt.Errorf("option has expired (settlement: %s)", opt.SettlementDate.Format("2006-01-02"))
+	}
+
+	// 4. Load the underlying stock listing for the current market price.
+	underlying, err := s.marketRepo.GetListingRecordByID(opt.StockListingID)
+	if err != nil || underlying == nil {
+		return fmt.Errorf("underlying stock listing not found")
+	}
+
+	marketPrice := underlying.Price
+	strikePrice := opt.StrikePrice
+
+	// 5. Validate in-the-money and determine direction.
+	var direction string
+	var intrinsicValue float64 // per share
+
+	switch opt.OptionType {
+	case "call":
+		if marketPrice <= strikePrice {
+			return fmt.Errorf("CALL option is not in-the-money (market: %.2f, strike: %.2f)", marketPrice, strikePrice)
+		}
+		direction = "buy"
+		intrinsicValue = marketPrice - strikePrice
+	case "put":
+		if marketPrice >= strikePrice {
+			return fmt.Errorf("PUT option is not in-the-money (market: %.2f, strike: %.2f)", marketPrice, strikePrice)
+		}
+		direction = "sell"
+		intrinsicValue = strikePrice - marketPrice
+	default:
+		return fmt.Errorf("unknown option type: %s", opt.OptionType)
+	}
+
+	// Each option contract covers optionContractSize shares.
+	totalShares := int64(holding.Quantity) * optionContractSize
+	exerciseProfit := roundPnL(intrinsicValue * float64(totalShares))
+
+	// 6. Create a synthetic exercise order for the underlying stock.
+	now := time.Now().UTC()
+	exerciseOrder := &models.OrderRecord{
+		UserID:            holding.UserID,
+		UserType:          holding.UserType,
+		AssetID:           underlying.ID,
+		OrderType:         "market",
+		Direction:         direction,
+		Quantity:          totalShares,
+		ContractSize:      1,
+		PricePerUnit:      strikePrice,
+		Status:            "done",
+		IsDone:            true,
+		RemainingPortions: 0,
+		AccountID:         holding.AccountID,
+		LastModification:  now,
+		CreatedAt:         now,
+	}
+	if err := s.orderRepo.CreateOrder(exerciseOrder); err != nil {
+		return fmt.Errorf("failed to create exercise order: %w", err)
+	}
+
+	// 7. Record the fill transaction.
+	txRecord := &models.OrderTransactionRecord{
+		OrderID:      exerciseOrder.ID,
+		Quantity:     totalShares,
+		PricePerUnit: strikePrice,
+		ExecutedAt:   now,
+	}
+	if err := s.orderRepo.CreateOrderTransaction(txRecord); err != nil {
+		return fmt.Errorf("failed to record exercise transaction: %w", err)
+	}
+
+	// 8. Update the underlying stock portfolio holding.
+	if direction == "buy" {
+		if err := s.portfolioRepo.RecordBuyFill(
+			holding.UserID, holding.UserType, underlying.ID, holding.AccountID,
+			float64(totalShares), strikePrice,
+		); err != nil {
+			return fmt.Errorf("failed to update underlying stock holding: %w", err)
+		}
+	} else {
+		if _, err := s.portfolioRepo.RecordSellFill(
+			holding.UserID, holding.UserType, underlying.ID,
+			float64(totalShares), strikePrice,
+		); err != nil {
+			return fmt.Errorf("failed to update underlying stock holding: %w", err)
+		}
+	}
+
+	// 9. Zero out the option holding and record exercise profit.
+	if err := s.portfolioRepo.ExerciseOptionHolding(holdingID, exerciseProfit); err != nil {
+		return fmt.Errorf("failed to close option holding: %w", err)
+	}
+
+	// 10. Create a TaxRecord for the exercise profit if positive.
+	if exerciseProfit > 0 {
+		tax := roundPnL(exerciseProfit * capitalGainsTaxRate)
+		taxRecord := &models.TaxRecord{
+			UserID:    holding.UserID,
+			UserType:  holding.UserType,
+			AssetID:   holding.AssetID,
+			Period:    now.Format("2006-01"),
+			ProfitRSD: exerciseProfit,
+			TaxRSD:    tax,
+			Status:    "unpaid",
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		_ = s.taxRepo.CreateTaxRecord(taxRecord) // non-fatal
+	}
+
+	return nil
 }
 
 // --- helpers ---

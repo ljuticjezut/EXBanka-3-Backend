@@ -119,6 +119,22 @@ func (r *PortfolioRepository) RecordSellFill(userID uint, userType string, asset
 	return
 }
 
+// ExerciseOptionHolding zeroes out an option holding's quantity and adds the
+// exercise profit to its cumulative realized_profit.
+func (r *PortfolioRepository) ExerciseOptionHolding(id uint, exerciseProfit float64) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		var h models.PortfolioHoldingRecord
+		if err := tx.First(&h, id).Error; err != nil {
+			return err
+		}
+		return tx.Model(&h).Updates(map[string]interface{}{
+			"quantity":        0,
+			"realized_profit": h.RealizedProfit + exerciseProfit,
+			"updated_at":      time.Now().UTC(),
+		}).Error
+	})
+}
+
 // SetHoldingPublic toggles the is_public flag on a holding (used for OTC shares).
 func (r *PortfolioRepository) SetHoldingPublic(id uint, isPublic bool) error {
 	return r.db.Model(&models.PortfolioHoldingRecord{}).Where("id = ?", id).Updates(map[string]interface{}{
