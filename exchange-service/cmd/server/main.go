@@ -55,6 +55,10 @@ func main() {
 	marketSvc := service.NewMarketService(marketProvider)
 	marketH := handler.NewMarketHTTPHandler(cfg, marketSvc, marketRepo)
 
+	orderRepo := repository.NewOrderRepository(db)
+	orderSvc := service.NewOrderService(orderRepo, marketRepo)
+	orderH := handler.NewOrderHTTPHandler(cfg, orderSvc)
+
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
 			middleware.LoggingInterceptor(),
@@ -96,6 +100,8 @@ func main() {
 	httpMux.Handle("/api/v1/listings", middleware.CORS(http.HandlerFunc(marketH.ListListings)))
 	httpMux.Handle("/api/v1/listings/", middleware.CORS(http.HandlerFunc(marketH.ListingRoutes)))
 	httpMux.Handle("/api/v1/portfolio", middleware.CORS(http.HandlerFunc(marketH.GetPortfolio)))
+	httpMux.Handle("/api/v1/orders", middleware.CORS(http.HandlerFunc(orderH.OrdersCollection)))
+	httpMux.Handle("/api/v1/orders/", middleware.CORS(http.HandlerFunc(orderH.OrderRoutes)))
 	httpMux.Handle("/", middleware.CORS(gwMux))
 
 	httpServer := &http.Server{

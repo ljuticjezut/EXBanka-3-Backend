@@ -1,0 +1,407 @@
+package handler
+
+import (
+	"encoding/json"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/config"
+	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/models"
+	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/service"
+	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/util"
+)
+
+type OrderHTTPHandler struct {
+	cfg *config.Config
+	svc *service.OrderService
+}
+
+func NewOrderHTTPHandler(cfg *config.Config, svc *service.OrderService) *OrderHTTPHandler {
+	return &OrderHTTPHandler{cfg: cfg, svc: svc}
+}
+
+// OrdersCollection handles /api/v1/orders (no trailing ID).
+func (h *OrderHTTPHandler) OrdersCollection(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.listOrders(w, r)
+	case http.MethodPost:
+		h.createOrder(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// OrderRoutes handles /api/v1/orders/{id} and sub-paths.
+func (h *OrderHTTPHandler) OrderRoutes(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/orders/"), "/")
+	if path == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	parts := strings.Split(path, "/")
+	idStr := parts[0]
+	id, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "invalid order id"})
+		return
+	}
+	orderID := uint(id)
+
+	if len(parts) == 1 {
+		// GET /api/v1/orders/{id}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.getOrder(w, r, orderID)
+		return
+	}
+
+	sub := parts[1]
+	switch {
+	case sub == "approve" && r.Method == http.MethodPost:
+		h.approveOrder(w, r, orderID)
+	case sub == "decline" && r.Method == http.MethodPost:
+		h.declineOrder(w, r, orderID)
+	case sub == "cancel" && r.Method == http.MethodPost:
+		h.cancelOrder(w, r, orderID)
+	case sub == "transactions" && r.Method == http.MethodGet:
+		h.listTransactions(w, r, orderID)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// --- handlers ---
+
+func (h *OrderHTTPHandler) createOrder(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireAuthenticatedHTTP(w, r, h.cfg)
+	if !ok {
+		return
+	}
+	if !requireTradingAccessHTTP(w, claims) {
+		return
+	}
+
+	var body createOrderRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "invalid request body"})
+		return
+	}
+
+	userID, userType := callerIdentity(claims)
+
+	input := service.CreateOrderInput{
+		UserID:       userID,
+		UserType:     userType,
+		AssetTicker:  body.AssetTicker,
+		OrderType:    body.OrderType,
+		Direction:    body.Direction,
+		Quantity:     body.Quantity,
+		ContractSize: body.ContractSize,
+		LimitValue:   body.LimitValue,
+		StopValue:    body.StopValue,
+		IsAON:        body.IsAON,
+		IsMargin:     body.IsMargin,
+		AccountID:    body.AccountID,
+		AfterHours:   body.AfterHours,
+	}
+
+	result, err := h.svc.CreateOrder(input)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"order":      orderToResponse(result.Order),
+		"commission": result.Commission,
+		"totalPrice": result.TotalPrice,
+	})
+}
+
+func (h *OrderHTTPHandler) listOrders(w http.ResponseWriter, r *http.Request) {
+	claims, ok := requireAuthenticatedHTTP(w, r, h.cfg)
+	if !ok {
+		return
+	}
+	if !requireTradingAccessHTTP(w, claims) {
+		return
+	}
+
+	statusFilter := r.URL.Query().Get("status")
+	userID, userType := callerIdentity(claims)
+
+	// Supervisors can optionally filter by a different user via ?userId=N&userType=employee|client
+	if util.HasPermission(claims, models.PermEmployeeSupervisor) {
+		if uidStr := r.URL.Query().Get("userId"); uidStr != "" {
+			uid, err := strconv.ParseUint(uidStr, 10, 64)
+			if err == nil {
+				userID = uint(uid)
+				if ut := r.URL.Query().Get("userType"); ut != "" {
+					userType = ut
+				}
+			}
+		}
+	}
+
+	orders, err := h.svc.ListOrdersForUser(userID, userType, statusFilter)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"message": "failed to load orders"})
+		return
+	}
+
+	items := make([]orderResponse, 0, len(orders))
+	for i := range orders {
+		items = append(items, orderToResponse(&orders[i]))
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"orders": items,
+		"count":  len(items),
+	})
+}
+
+func (h *OrderHTTPHandler) getOrder(w http.ResponseWriter, r *http.Request, orderID uint) {
+	claims, ok := requireAuthenticatedHTTP(w, r, h.cfg)
+	if !ok {
+		return
+	}
+
+	order, err := h.svc.GetOrder(orderID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "order not found"})
+		return
+	}
+
+	if !isSupervisor(claims) && !isOwner(claims, order) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"message": "access denied"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"order": orderToResponse(order)})
+}
+
+func (h *OrderHTTPHandler) approveOrder(w http.ResponseWriter, r *http.Request, orderID uint) {
+	claims, ok := requireAuthenticatedHTTP(w, r, h.cfg)
+	if !ok {
+		return
+	}
+	if !requireSupervisorHTTP(w, claims) {
+		return
+	}
+
+	if err := h.svc.ApproveOrder(orderID, claims.EmployeeID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": "order approved"})
+}
+
+func (h *OrderHTTPHandler) declineOrder(w http.ResponseWriter, r *http.Request, orderID uint) {
+	claims, ok := requireAuthenticatedHTTP(w, r, h.cfg)
+	if !ok {
+		return
+	}
+	if !requireSupervisorHTTP(w, claims) {
+		return
+	}
+
+	if err := h.svc.DeclineOrder(orderID, claims.EmployeeID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": "order declined"})
+}
+
+func (h *OrderHTTPHandler) cancelOrder(w http.ResponseWriter, r *http.Request, orderID uint) {
+	claims, ok := requireAuthenticatedHTTP(w, r, h.cfg)
+	if !ok {
+		return
+	}
+
+	order, err := h.svc.GetOrder(orderID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "order not found"})
+		return
+	}
+
+	if !isSupervisor(claims) && !isOwner(claims, order) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"message": "access denied"})
+		return
+	}
+
+	var body struct {
+		NewRemaining int64 `json:"newRemaining"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		body.NewRemaining = 0 // default to full cancel
+	}
+
+	requesterID, _ := callerIdentity(claims)
+	if err := h.svc.CancelOrder(orderID, requesterID, body.NewRemaining); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"message": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": "order cancelled"})
+}
+
+func (h *OrderHTTPHandler) listTransactions(w http.ResponseWriter, r *http.Request, orderID uint) {
+	claims, ok := requireAuthenticatedHTTP(w, r, h.cfg)
+	if !ok {
+		return
+	}
+
+	order, err := h.svc.GetOrder(orderID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"message": "order not found"})
+		return
+	}
+
+	if !isSupervisor(claims) && !isOwner(claims, order) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"message": "access denied"})
+		return
+	}
+
+	txs, err := h.svc.ListTransactionsForOrder(orderID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"message": "failed to load transactions"})
+		return
+	}
+
+	items := make([]transactionResponse, 0, len(txs))
+	for _, tx := range txs {
+		items = append(items, transactionResponse{
+			ID:           tx.ID,
+			OrderID:      tx.OrderID,
+			Quantity:     tx.Quantity,
+			PricePerUnit: tx.PricePerUnit,
+			ExecutedAt:   tx.ExecutedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"transactions": items,
+		"count":        len(items),
+	})
+}
+
+// --- helpers ---
+
+func callerIdentity(claims *util.Claims) (userID uint, userType string) {
+	if claims.TokenSource == "client" {
+		return claims.ClientID, "client"
+	}
+	return claims.EmployeeID, "employee"
+}
+
+func isSupervisor(claims *util.Claims) bool {
+	return claims.TokenSource == "employee" &&
+		util.HasPermission(claims, models.PermEmployeeSupervisor)
+}
+
+func isOwner(claims *util.Claims, order *models.OrderRecord) bool {
+	uid, utype := callerIdentity(claims)
+	return order.UserType == utype && order.UserID == uid
+}
+
+// requireTradingAccessHTTP allows agents, supervisors, and clients with trading permission.
+func requireTradingAccessHTTP(w http.ResponseWriter, claims *util.Claims) bool {
+	if claims.TokenSource == "employee" {
+		if !util.HasPermission(claims, models.PermEmployeeAgent) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"message": "actuary access required"})
+			return false
+		}
+		return true
+	}
+	if claims.TokenSource == "client" {
+		if !util.HasPermission(claims, models.PermClientTrading) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"message": "trading permission required"})
+			return false
+		}
+		return true
+	}
+	writeJSON(w, http.StatusForbidden, map[string]string{"message": "access denied"})
+	return false
+}
+
+// --- request / response types ---
+
+type createOrderRequest struct {
+	AssetTicker  string   `json:"assetTicker"`
+	OrderType    string   `json:"orderType"`
+	Direction    string   `json:"direction"`
+	Quantity     int64    `json:"quantity"`
+	ContractSize int64    `json:"contractSize"`
+	LimitValue   *float64 `json:"limitValue"`
+	StopValue    *float64 `json:"stopValue"`
+	IsAON        bool     `json:"isAON"`
+	IsMargin     bool     `json:"isMargin"`
+	AccountID    uint     `json:"accountId"`
+	AfterHours   bool     `json:"afterHours"`
+}
+
+type orderResponse struct {
+	ID                uint     `json:"id"`
+	UserID            uint     `json:"userId"`
+	UserType          string   `json:"userType"`
+	AssetTicker       string   `json:"assetTicker"`
+	AssetName         string   `json:"assetName"`
+	OrderType         string   `json:"orderType"`
+	Direction         string   `json:"direction"`
+	Quantity          int64    `json:"quantity"`
+	ContractSize      int64    `json:"contractSize"`
+	PricePerUnit      float64  `json:"pricePerUnit"`
+	LimitValue        *float64 `json:"limitValue"`
+	StopValue         *float64 `json:"stopValue"`
+	IsAON             bool     `json:"isAON"`
+	IsMargin          bool     `json:"isMargin"`
+	Status            string   `json:"status"`
+	IsDone            bool     `json:"isDone"`
+	RemainingPortions int64    `json:"remainingPortions"`
+	AfterHours        bool     `json:"afterHours"`
+	AccountID         uint     `json:"accountId"`
+	ApprovedBy        *uint    `json:"approvedBy"`
+	LastModification  string   `json:"lastModification"`
+	CreatedAt         string   `json:"createdAt"`
+}
+
+type transactionResponse struct {
+	ID           uint    `json:"id"`
+	OrderID      uint    `json:"orderId"`
+	Quantity     int64   `json:"quantity"`
+	PricePerUnit float64 `json:"pricePerUnit"`
+	ExecutedAt   string  `json:"executedAt"`
+}
+
+func orderToResponse(o *models.OrderRecord) orderResponse {
+	return orderResponse{
+		ID:                o.ID,
+		UserID:            o.UserID,
+		UserType:          o.UserType,
+		AssetTicker:       o.Asset.Ticker,
+		AssetName:         o.Asset.Name,
+		OrderType:         o.OrderType,
+		Direction:         o.Direction,
+		Quantity:          o.Quantity,
+		ContractSize:      o.ContractSize,
+		PricePerUnit:      o.PricePerUnit,
+		LimitValue:        o.LimitValue,
+		StopValue:         o.StopValue,
+		IsAON:             o.IsAON,
+		IsMargin:          o.IsMargin,
+		Status:            o.Status,
+		IsDone:            o.IsDone,
+		RemainingPortions: o.RemainingPortions,
+		AfterHours:        o.AfterHours,
+		AccountID:         o.AccountID,
+		ApprovedBy:        o.ApprovedBy,
+		LastModification:  o.LastModification.UTC().Format(time.RFC3339),
+		CreatedAt:         o.CreatedAt.UTC().Format(time.RFC3339),
+	}
+}
