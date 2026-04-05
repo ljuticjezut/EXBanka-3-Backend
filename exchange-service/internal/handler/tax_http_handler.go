@@ -136,10 +136,20 @@ func (h *TaxHTTPHandler) getUserSummary(w http.ResponseWriter, r *http.Request, 
 	}
 
 	period := r.URL.Query().Get("period")
+	year := r.URL.Query().Get("year")
+	if year == "" {
+		year = time.Now().UTC().Format("2006")
+	}
 
 	totalUnpaid, err := h.taxSvc.SumUnpaidTax(targetUserID, userType, period)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"message": "failed to compute tax summary"})
+		return
+	}
+
+	paidThisYear, err := h.taxSvc.SumPaidTaxForYear(targetUserID, userType, year)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"message": "failed to compute paid tax"})
 		return
 	}
 
@@ -150,11 +160,12 @@ func (h *TaxHTTPHandler) getUserSummary(w http.ResponseWriter, r *http.Request, 
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"user_id":      targetUserID,
-		"user_type":    userType,
-		"period":       period,
-		"total_unpaid": totalUnpaid,
-		"record_count": len(records),
+		"user_id":        targetUserID,
+		"user_type":      userType,
+		"period":         period,
+		"total_unpaid":   totalUnpaid,
+		"paid_this_year": paidThisYear,
+		"record_count":   len(records),
 	})
 }
 

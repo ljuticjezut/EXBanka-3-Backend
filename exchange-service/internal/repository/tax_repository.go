@@ -41,6 +41,16 @@ func (r *TaxRepository) SumUnpaidTaxForUser(userID uint, userType, period string
 	return total, err
 }
 
+// SumPaidTaxForUserYear returns the total paid tax amount for a user in a given year (e.g. "2026").
+func (r *TaxRepository) SumPaidTaxForUserYear(userID uint, userType, year string) (float64, error) {
+	var total float64
+	err := r.db.Model(&models.TaxRecord{}).
+		Where("user_id = ? AND user_type = ? AND period LIKE ? AND status = 'paid'", userID, userType, year+"-%").
+		Select("COALESCE(SUM(tax_rsd), 0)").
+		Scan(&total).Error
+	return total, err
+}
+
 // ListAllTaxRecords returns all tax records, optionally filtered by period.
 // Intended for supervisor use only.
 func (r *TaxRepository) ListAllTaxRecords(period string) ([]models.TaxRecord, error) {
