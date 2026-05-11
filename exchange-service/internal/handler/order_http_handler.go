@@ -115,7 +115,7 @@ func (h *OrderHTTPHandler) createOrder(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"message": "samo supervisor moze trgovati za fond"})
 			return
 		}
-		fund, err := h.fundSvc.ValidateFundBuyOrder(body.FundID, claims.EmployeeID, body.AccountID, "")
+		fund, err := h.fundSvc.ValidateFundBuyOrder(body.FundID, claims.EmployeeID, body.AccountID)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"message": err.Error()})
 			return

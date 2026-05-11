@@ -66,6 +66,17 @@ func (h *OtcHTTPHandler) OtcRoutes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.listContracts(w, r)
+	case len(parts) == 2 && parts[0] == "contracts":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		contractID, err := strconv.ParseUint(parts[1], 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"message": "invalid contract id"})
+			return
+		}
+		h.getContract(w, r, uint(contractID))
 	case len(parts) == 3 && parts[0] == "contracts" && parts[2] == "exercise":
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -256,6 +267,31 @@ func (h *OtcHTTPHandler) listContracts(w http.ResponseWriter, r *http.Request) {
 		"count":     len(items),
 		"status":    status,
 	})
+}
+
+// getContract handles GET /api/v1/otc/contracts/{id}. Returns the contract
+// only if the caller is buyer or seller. Added per OTC-2.
+func (h *OtcHTTPHandler) getContract(w http.ResponseWriter, r *http.Request, contractID uint) {
+	claims, ok := requireAuthenticatedHTTP(w, r, h.cfg)
+	if !ok {
+		return
+	}
+	if !requireTradingAccessHTTP(w, claims) {
+		return
+	}
+
+	userID, userType := callerIdentity(claims)
+	contract, err := h.svc.GetContractForParticipant(contractID, userID, userType)
+	if err != nil {
+		if errors.Is(err, service.ErrOtcContractNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"message": "contract not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"message": "failed to load contract"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"contract": otcContractToResponse(*contract)})
 }
 
 func (h *OtcHTTPHandler) getOffer(w http.ResponseWriter, r *http.Request, offerID uint) {

@@ -171,18 +171,6 @@ func (r *FundRepository) ListFundsByManager(managerID uint) ([]models.Investment
 	return funds, nil
 }
 
-// ReassignFundsManager transfers all funds currently managed by oldManagerID to
-// newManagerID. Returns the count of funds moved.
-func (r *FundRepository) ReassignFundsManager(oldManagerID, newManagerID uint) (int64, error) {
-	res := r.db.Model(&models.InvestmentFundRecord{}).
-		Where("manager_id = ?", oldManagerID).
-		Updates(map[string]interface{}{
-			"manager_id": newManagerID,
-			"updated_at": time.Now().UTC(),
-		})
-	return res.RowsAffected, res.Error
-}
-
 // --- positions & transactions ---
 
 func (r *FundRepository) GetPosition(clientID uint, clientType string, fundID uint) (*models.ClientFundPositionRecord, error) {
@@ -263,41 +251,70 @@ func (r *FundRepository) RecordInvestment(
 }
 
 // RecordWithdrawal credits the destination account from the fund's account and
-// reduces the client's position by the withdrawal amount (clamped at zero).
+// reduces the client's position by the cost-basis fraction that was withdrawn.
+//
+// Money flow:
+//   fund_account  -= netToClient   (commission stays in the fund — option B from FUND-1)
+//   destination   += netToClient
+//
+// `amount` is the GROSS withdrawal value (share × fundValue) — recorded in the
+// transaction row for audit. `positionReduction` is the cost-basis decrement to
+// apply to UkupanUlozeniIznos (see FUND-2: must be proportional, not gross).
 func (r *FundRepository) RecordWithdrawal(
 	clientID uint, clientType string,
-	fundID uint, fundAccountID, destinationAccountID uint, amount float64, commission float64,
+	fundID uint, fundAccountID, destinationAccountID uint, amount float64, commission float64, positionReduction float64,
 ) (*models.ClientFundTransactionRecord, error) {
 	var txRecord models.ClientFundTransactionRecord
 	err := r.db.Transaction(func(tx *gorm.DB) error {
-		if err := debitFundAccount(tx, fundAccountID, amount); err != nil {
+		rec, err := RecordWithdrawalTx(tx, clientID, clientType, fundID, fundAccountID, destinationAccountID, amount, commission, positionReduction)
+		if err != nil {
 			return err
 		}
-		netToClient := amount - commission
-		if netToClient < 0 {
-			netToClient = 0
-		}
-		if err := creditFundAccount(tx, destinationAccountID, netToClient); err != nil {
-			return err
-		}
-		now := time.Now().UTC()
-		txRecord = models.ClientFundTransactionRecord{
-			ClientID:   clientID,
-			ClientType: clientType,
-			FundID:     fundID,
-			AccountID:  destinationAccountID,
-			Iznos:      amount,
-			Status:     models.FundTransactionStatusCompleted,
-			IsInflow:   false,
-			Timestamp:  now,
-			CreatedAt:  now,
-		}
-		if err := tx.Create(&txRecord).Error; err != nil {
-			return err
-		}
-		return reducePosition(tx, clientID, clientType, fundID, amount)
+		txRecord = *rec
+		return nil
 	})
 	if err != nil {
+		return nil, err
+	}
+	return &txRecord, nil
+}
+
+// RecordWithdrawalTx is the transaction-aware variant of RecordWithdrawal. It
+// runs inside the caller-provided `tx`, allowing fund-service to combine
+// liquidation and withdrawal in a single atomic transaction (FUND-3).
+func RecordWithdrawalTx(
+	tx *gorm.DB,
+	clientID uint, clientType string,
+	fundID uint, fundAccountID, destinationAccountID uint, amount float64, commission float64, positionReduction float64,
+) (*models.ClientFundTransactionRecord, error) {
+	netToClient := amount - commission
+	if netToClient < 0 {
+		netToClient = 0
+	}
+	// FUND-1: only debit the fund by what actually leaves it. Commission stays
+	// inside the fund's account, which preserves total bookkeeping value.
+	if err := debitFundAccount(tx, fundAccountID, netToClient); err != nil {
+		return nil, err
+	}
+	if err := creditFundAccount(tx, destinationAccountID, netToClient); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	txRecord := models.ClientFundTransactionRecord{
+		ClientID:   clientID,
+		ClientType: clientType,
+		FundID:     fundID,
+		AccountID:  destinationAccountID,
+		Iznos:      amount,
+		Status:     models.FundTransactionStatusCompleted,
+		IsInflow:   false,
+		Timestamp:  now,
+		CreatedAt:  now,
+	}
+	if err := tx.Create(&txRecord).Error; err != nil {
+		return nil, err
+	}
+	if err := reducePosition(tx, clientID, clientType, fundID, positionReduction); err != nil {
 		return nil, err
 	}
 	return &txRecord, nil

@@ -122,7 +122,11 @@ func (r *OtcRepository) AcceptOfferAndCreateContract(offerID uint, sellerID uint
 		}
 
 		var holding models.PortfolioHoldingRecord
-		if err := tx.Preload("Asset").First(&holding, offer.SellerHoldingID).Error; err != nil {
+		// OTC-4: row-lock the holding so concurrent acceptances of different
+		// pending offers on the same holding cannot over-reserve
+		// reserved_quantity (which is read-modify-write).
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Preload("Asset").First(&holding, offer.SellerHoldingID).Error; err != nil {
 			return err
 		}
 		if holding.Asset.Type != string(models.ListingTypeStock) {
@@ -236,10 +240,19 @@ func (r *OtcRepository) ListContractsForParticipant(userID uint, userType, statu
 	return contracts, nil
 }
 
+// OTC-1: contracts remain valid through the entire calendar day of
+// settlement_date. They expire only once 24h have passed since settlement_date
+// (i.e. at 00:00 UTC of the day AFTER settlement_date). The same cutoff is
+// applied by OtcService.ExerciseContract — keeping cron, BE exercise window,
+// and FE Iskoristi-button in agreement.
+func otcExpiryCutoff(referenceTime time.Time) time.Time {
+	return referenceTime.Add(-24 * time.Hour)
+}
+
 func (r *OtcRepository) ListExpiredValidContracts(referenceTime time.Time) ([]models.OtcContractRecord, error) {
 	var contracts []models.OtcContractRecord
 	if err := r.contractPreloads(r.db).
-		Where("status = ? AND settlement_date < ?", models.OtcContractStatusValid, referenceTime).
+		Where("status = ? AND settlement_date <= ?", models.OtcContractStatusValid, otcExpiryCutoff(referenceTime)).
 		Order("settlement_date ASC, id ASC").
 		Find(&contracts).Error; err != nil {
 		return nil, err
@@ -252,7 +265,7 @@ func (r *OtcRepository) ExpireValidContracts(referenceTime time.Time) (int, erro
 	err := r.db.Transaction(func(tx *gorm.DB) error {
 		var contracts []models.OtcContractRecord
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Where("status = ? AND settlement_date < ?", models.OtcContractStatusValid, referenceTime).
+			Where("status = ? AND settlement_date <= ?", models.OtcContractStatusValid, otcExpiryCutoff(referenceTime)).
 			Order("settlement_date ASC, id ASC").
 			Find(&contracts).Error; err != nil {
 			return err

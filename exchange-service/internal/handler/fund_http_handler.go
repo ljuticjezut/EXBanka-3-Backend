@@ -33,7 +33,10 @@ func NewFundHTTPHandler(cfg *config.Config, svc *service.FundService) *FundHTTPH
 //	POST   /api/v1/funds/{id}/withdraw              withdraw from fund
 //	GET    /api/v1/funds/positions/mine             positions of caller
 //	POST   /api/v1/funds/{id}/orders                supervisor places buy-for-fund order metadata (validation only)
-//	POST   /api/v1/funds/transfer-ownership         admin-triggered ownership transfer
+//
+// Note: manager reassignment on supervisor demotion is owned by employee-service
+// (writes investment_funds.manager_id directly via shared DB). No HTTP endpoint
+// is exposed here because there are no external callers.
 func (h *FundHTTPHandler) FundRoutes(w http.ResponseWriter, r *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/funds"), "/")
 	if path == "" {
@@ -56,12 +59,6 @@ func (h *FundHTTPHandler) FundRoutes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.listMyPositions(w, r)
-	case len(parts) == 1 && parts[0] == "transfer-ownership":
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		h.transferOwnership(w, r)
 	case len(parts) == 1:
 		id, err := strconv.ParseUint(parts[0], 10, 64)
 		if err != nil {
@@ -411,35 +408,6 @@ func (h *FundHTTPHandler) listMyPositions(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]interface{}{"positions": items, "count": len(items), "role": "client"})
 }
 
-func (h *FundHTTPHandler) transferOwnership(w http.ResponseWriter, r *http.Request) {
-	claims, ok := requireAuthenticatedHTTP(w, r, h.cfg)
-	if !ok {
-		return
-	}
-	// Only employees with admin permission can issue this call (it is also
-	// invoked internally from employee-service when a supervisor permission is
-	// removed — that path uses an admin token).
-	if claims.TokenSource != "employee" || !util.HasPermission(claims, models.PermEmployeeAdmin) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"message": "admin only"})
-		return
-	}
-
-	var body struct {
-		OldManagerID uint `json:"oldManagerId"`
-		NewManagerID uint `json:"newManagerId"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"message": "neispravan zahtev"})
-		return
-	}
-	moved, err := h.svc.ReassignManagedFunds(body.OldManagerID, body.NewManagerID)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"message": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"reassigned": moved})
-}
-
 func (h *FundHTTPHandler) validateFundOrder(w http.ResponseWriter, r *http.Request, fundID uint) {
 	claims, ok := requireAuthenticatedHTTP(w, r, h.cfg)
 	if !ok {
@@ -448,16 +416,12 @@ func (h *FundHTTPHandler) validateFundOrder(w http.ResponseWriter, r *http.Reque
 	if !requireSupervisorHTTP(w, claims) {
 		return
 	}
-	var body struct {
-		AssetCurrency string `json:"assetCurrency"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
 	fund, err := h.svc.GetFund(fundID)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"message": "fond nije pronadjen"})
 		return
 	}
-	if _, err := h.svc.ValidateFundBuyOrder(fundID, claims.EmployeeID, fund.AccountID, body.AssetCurrency); err != nil {
+	if _, err := h.svc.ValidateFundBuyOrder(fundID, claims.EmployeeID, fund.AccountID); err != nil {
 		writeJSON(w, http.StatusForbidden, map[string]string{"message": err.Error()})
 		return
 	}

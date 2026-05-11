@@ -9,6 +9,7 @@ import (
 
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/models"
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/repository"
+	"gorm.io/gorm"
 )
 
 var (
@@ -326,27 +327,42 @@ func (s *FundService) WithdrawFromFund(input WithdrawFromFundInput) (*WithdrawRe
 		}
 	}
 
-	// Auto-liquidate fund holdings if liquid cash is insufficient.
-	liquidatedItems := []LiquidatedItem{}
-	liquidated := false
-	if summary.LiquidCashRSD < requested {
-		shortfall := requested - summary.LiquidCashRSD
-		items, err := s.liquidateFundHoldings(fund, shortfall)
-		if err != nil {
-			return nil, fmt.Errorf("auto-likvidacija nije uspela: %w", err)
-		}
-		liquidatedItems = items
-		liquidated = len(items) > 0
-	}
-
 	commission := 0.0
 	if input.ClientType == "client" {
 		commission = round2RSD(requested * fundWithdrawalCommissionRate)
 	}
 
-	_, err = s.fundRepo.RecordWithdrawal(input.ClientID, input.ClientType, fund.ID, fund.AccountID, destination.ID, requested, commission)
-	if err != nil {
-		return nil, err
+	// FUND-2: reduce UkupanUlozeniIznos PROPORTIONALLY to the share withdrawn,
+	// not by the gross withdrawal amount. Avoids inflating displayed profit on
+	// partial withdrawals from appreciated funds.
+	positionReduction := pos.UkupanUlozeniIznos
+	if maxAvailable > 0 && requested < maxAvailable {
+		positionReduction = round2RSD(pos.UkupanUlozeniIznos * (requested / maxAvailable))
+	}
+	if positionReduction > pos.UkupanUlozeniIznos {
+		positionReduction = pos.UkupanUlozeniIznos
+	}
+
+	// FUND-3: wrap auto-liquidation + RecordWithdrawal in a single DB
+	// transaction so a failure in the withdrawal step does not leave the fund
+	// with sold-off holdings and no corresponding outflow.
+	liquidatedItems := []LiquidatedItem{}
+	liquidated := false
+	txErr := s.fundRepo.DB().Transaction(func(tx *gorm.DB) error {
+		if summary.LiquidCashRSD < requested {
+			shortfall := requested - summary.LiquidCashRSD
+			items, err := s.liquidateFundHoldingsTx(tx, fund, shortfall)
+			if err != nil {
+				return fmt.Errorf("auto-likvidacija nije uspela: %w", err)
+			}
+			liquidatedItems = items
+			liquidated = len(items) > 0
+		}
+		_, err := repository.RecordWithdrawalTx(tx, input.ClientID, input.ClientType, fund.ID, fund.AccountID, destination.ID, requested, commission, positionReduction)
+		return err
+	})
+	if txErr != nil {
+		return nil, txErr
 	}
 
 	return &WithdrawResult{
@@ -358,15 +374,20 @@ func (s *FundService) WithdrawFromFund(input WithdrawFromFundInput) (*WithdrawRe
 	}, nil
 }
 
-// liquidateFundHoldings sells fund holdings at the current market price until
-// the fund has at least `requiredRSD` in liquid cash. Cash proceeds are
-// credited to the fund's RSD account. Returns the per-asset liquidations.
+// liquidateFundHoldingsTx sells fund holdings at the current market price
+// inside the caller-provided transaction until the fund has at least
+// `requiredRSD` in liquid cash. Cash proceeds are credited to the fund's RSD
+// account. Returns the per-asset liquidations.
 //
-// This is a simplified market-sell flow (no commission, no order routing) that
-// mirrors what the order executor does on a fill, scoped to fund-owned assets.
-func (s *FundService) liquidateFundHoldings(fund *models.InvestmentFundRecord, requiredRSD float64) ([]LiquidatedItem, error) {
-	holdings, err := s.portfolioRepo.ListHoldingsForUser(fund.ID, models.PortfolioOwnerFund)
-	if err != nil {
+// FUND-3: runs inside the withdrawal transaction so a downstream failure
+// rolls back the liquidation.
+// FUND-4: sellQty is rounded UP to a whole share; sellValue is then recomputed
+// from the rounded sellQty so order-ledger and holding decrement agree.
+func (s *FundService) liquidateFundHoldingsTx(tx *gorm.DB, fund *models.InvestmentFundRecord, requiredRSD float64) ([]LiquidatedItem, error) {
+	var holdings []models.PortfolioHoldingRecord
+	if err := tx.Preload("Asset").Preload("Asset.Exchange").
+		Where("user_id = ? AND user_type = ? AND quantity > 0", fund.ID, models.PortfolioOwnerFund).
+		Order("created_at ASC").Find(&holdings).Error; err != nil {
 		return nil, err
 	}
 
@@ -386,17 +407,20 @@ func (s *FundService) liquidateFundHoldings(fund *models.InvestmentFundRecord, r
 		if priceRSD <= 0 {
 			continue
 		}
-		holdingValueRSD := round2RSD(priceRSD * h.Quantity)
+		// Decide how many shares to sell. We always sell whole shares (math.Ceil
+		// on the partial case) so the order-ledger Quantity (int64) matches the
+		// holding decrement; sellValue is then recomputed from the rounded qty.
 		sellQty := h.Quantity
-		sellValue := holdingValueRSD
-		if holdingValueRSD > remaining {
-			// Sell a partial chunk that covers the remaining shortfall.
-			sellQty = round2RSD(remaining / priceRSD)
+		if priceRSD*h.Quantity > remaining {
+			sellQty = math.Ceil(remaining / priceRSD)
 			if sellQty <= 0 {
 				continue
 			}
-			sellValue = round2RSD(priceRSD * sellQty)
+			if sellQty > h.Quantity {
+				sellQty = h.Quantity
+			}
 		}
+		sellValue := round2RSD(priceRSD * sellQty)
 
 		order := &models.OrderRecord{
 			UserID:            fund.ID,
@@ -404,7 +428,7 @@ func (s *FundService) liquidateFundHoldings(fund *models.InvestmentFundRecord, r
 			AssetID:           h.AssetID,
 			OrderType:         "market",
 			Direction:         "sell",
-			Quantity:          int64(math.Ceil(sellQty)),
+			Quantity:          int64(sellQty),
 			ContractSize:      1,
 			PricePerUnit:      h.Asset.Bid,
 			Status:            "done",
@@ -414,7 +438,7 @@ func (s *FundService) liquidateFundHoldings(fund *models.InvestmentFundRecord, r
 			LastModification:  now,
 			CreatedAt:         now,
 		}
-		if err := s.orderRepo.CreateOrder(order); err != nil {
+		if err := tx.Create(order).Error; err != nil {
 			return nil, fmt.Errorf("kreiranje likvidacionog ordera nije uspelo: %w", err)
 		}
 		txRec := &models.OrderTransactionRecord{
@@ -423,15 +447,17 @@ func (s *FundService) liquidateFundHoldings(fund *models.InvestmentFundRecord, r
 			PricePerUnit: h.Asset.Bid,
 			ExecutedAt:   now,
 		}
-		if err := s.orderRepo.CreateOrderTransaction(txRec); err != nil {
+		if err := tx.Create(txRec).Error; err != nil {
 			return nil, fmt.Errorf("kreiranje likvidacione transakcije nije uspelo: %w", err)
 		}
-		// Reduce the fund's holding by the sold quantity.
-		if _, err := s.portfolioRepo.RecordSellFill(fund.ID, models.PortfolioOwnerFund, h.AssetID, sellQty, h.Asset.Bid); err != nil {
+		if _, err := repository.RecordSellFillTx(tx, fund.ID, models.PortfolioOwnerFund, h.AssetID, sellQty, h.Asset.Bid); err != nil {
 			return nil, fmt.Errorf("azuriranje fondske pozicije nije uspelo: %w", err)
 		}
-		// Credit the fund's RSD account with the (RSD-converted) proceeds.
-		if err := s.fundRepo.CreditAccount(fund.AccountID, sellValue); err != nil {
+		if err := tx.Table("accounts").Where("id = ?", fund.AccountID).
+			Updates(map[string]interface{}{
+				"stanje":             gorm.Expr("stanje + ?", sellValue),
+				"raspolozivo_stanje": gorm.Expr("raspolozivo_stanje + ?", sellValue),
+			}).Error; err != nil {
 			return nil, err
 		}
 		liquidated = append(liquidated, LiquidatedItem{
@@ -572,24 +598,13 @@ func (s *FundService) GetPerformance(fundID uint, granularity string) ([]models.
 	return s.fundRepo.ListPerformance(fundID, from, now)
 }
 
-// --- Manager reassignment ---
-
-// ReassignManagedFunds moves every fund managed by `oldManagerID` to be managed
-// by `newManagerID`. Returns the number of funds reassigned.
-func (s *FundService) ReassignManagedFunds(oldManagerID, newManagerID uint) (int64, error) {
-	if oldManagerID == 0 || newManagerID == 0 {
-		return 0, fmt.Errorf("oldManagerID i newManagerID su obavezni")
-	}
-	return s.fundRepo.ReassignFundsManager(oldManagerID, newManagerID)
-}
-
 // --- Buy-for-fund pre-flight ---
 
 // ValidateFundBuyOrder ensures that the supervisor `actorID` manages the fund
 // `fundID`, that the order's account is the fund's own account, and that the
-// fund's account currency matches the asset's currency. Called by the HTTP
-// handler before delegating to OrderService.CreateOrder.
-func (s *FundService) ValidateFundBuyOrder(fundID, actorID uint, accountID uint, assetCurrency string) (*models.InvestmentFundRecord, error) {
+// fund's account is active. Called by the HTTP handler before delegating to
+// OrderService.CreateOrder.
+func (s *FundService) ValidateFundBuyOrder(fundID, actorID uint, accountID uint) (*models.InvestmentFundRecord, error) {
 	fund, err := s.GetFund(fundID)
 	if err != nil {
 		return nil, err

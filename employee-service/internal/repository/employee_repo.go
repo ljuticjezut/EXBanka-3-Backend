@@ -123,9 +123,16 @@ func (r *EmployeeRepository) UsernameExists(username string, excludeID uint) (bo
 }
 
 // ReassignFundsManagedBy moves every investment fund managed by oldManagerID to
-// be managed by newManagerID. Uses a raw UPDATE because the investment_funds
-// table is owned by the exchange-service but shares the database; only the
-// manager_id column is touched here.
+// be managed by newManagerID.
+//
+// Cross-service ownership note: the `investment_funds` table is conceptually
+// owned by exchange-service, but both services share the same database in this
+// project. employee-service owns the manager_id write because it is the trigger
+// of the change (supervisor permission removal) and the alternative — an HTTP
+// callout to exchange-service in the middle of a permission update — would
+// introduce additional failure modes (network, auth forwarding) for a write
+// that is structurally a single-column UPDATE. Only the manager_id and
+// updated_at columns are touched here; no other fund state is mutated.
 func (r *EmployeeRepository) ReassignFundsManagedBy(oldManagerID, newManagerID uint) (int64, error) {
 	res := r.db.Exec(
 		"UPDATE investment_funds SET manager_id = ?, updated_at = NOW() WHERE manager_id = ?",

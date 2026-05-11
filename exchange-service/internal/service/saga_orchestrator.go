@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/models"
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/repository"
@@ -125,7 +126,16 @@ func (o *SagaOrchestrator) RetryCompensations(saga *models.SagaTransactionRecord
 		if !ok {
 			continue
 		}
-		if rec.Status != models.SagaStepStatusCompleted {
+		// SAGA-1: retry must operate on two states:
+		//   - completed: never compensated yet (the original code's only branch)
+		//   - failed with "compensation:" prefix: compensation already attempted
+		//     and failed at least once. compensateBackward marks the step `failed`
+		//     in that case, so without this branch retry skips every step and
+		//     falsely flips the saga to rolled_back.
+		isCompleted := rec.Status == models.SagaStepStatusCompleted
+		isFailedCompensation := rec.Status == models.SagaStepStatusFailed &&
+			(strings.HasPrefix(rec.ErrorMessage, "compensation:") || strings.HasPrefix(rec.ErrorMessage, "retry compensation:"))
+		if !isCompleted && !isFailedCompensation {
 			continue
 		}
 		if step.Compensate == nil {

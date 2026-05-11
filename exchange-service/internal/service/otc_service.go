@@ -275,6 +275,24 @@ func (s *OtcService) ListContractsForParticipant(userID uint, userType string, s
 	return s.otcRepo.ListContractsForParticipant(userID, userType, status)
 }
 
+// GetContractForParticipant returns the contract iff the caller is buyer or
+// seller. Mirrors GetOfferForParticipant — used by GET /api/v1/otc/contracts/{id}.
+func (s *OtcService) GetContractForParticipant(contractID, userID uint, userType string) (*models.OtcContractRecord, error) {
+	contract, err := s.otcRepo.GetContractByID(contractID)
+	if err != nil {
+		return nil, err
+	}
+	if contract == nil {
+		return nil, ErrOtcContractNotFound
+	}
+	isBuyer := contract.BuyerID == userID && contract.BuyerType == userType
+	isSeller := contract.SellerID == userID && contract.SellerType == userType
+	if !isBuyer && !isSeller {
+		return nil, ErrOtcContractNotFound
+	}
+	return contract, nil
+}
+
 func (s *OtcService) ExpireDueContracts(referenceTime time.Time) (int, error) {
 	if referenceTime.IsZero() {
 		referenceTime = time.Now().UTC()

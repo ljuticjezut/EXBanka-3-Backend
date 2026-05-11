@@ -84,7 +84,7 @@ func BuildOtcExerciseSteps(contract *models.OtcContractRecord) []SagaStep {
 		{
 			Name: otcExerciseStepFinalizeReservations,
 			Forward: func(tx *gorm.DB) error {
-				return finalizeOtcExercise(tx, contractID, buyerAccountID, cost)
+				return finalizeOtcExercise(tx, contractID, buyerAccountID, sellerAccountID, sellerHoldingID, buyerID, buyerType, assetID, amount, cost)
 			},
 			Compensate: func(tx *gorm.DB) error {
 				return revertOtcExerciseFinalization(tx, contractID, buyerAccountID, cost)
@@ -318,15 +318,55 @@ func reverseShareOwnership(tx *gorm.DB, sellerHoldingID, buyerID uint, buyerType
 	return tx.Model(&buyer).Updates(updates).Error
 }
 
-// finalizeOtcExercise runs the final consistency check and marks the contract
-// as exercised. Step 1 already reserved (raspolozivo -= cost) and step 3
-// debited stanje, so the buyer account is in its final state already.
-func finalizeOtcExercise(tx *gorm.DB, contractID, buyerAccountID uint, cost float64) error {
-	var account repository.OtcAccountReference
-	if err := lockAccount(tx, buyerAccountID, &account); err != nil {
-		return err
+// finalizeOtcExercise runs the consistency check that the spec mandates and
+// marks the contract as exercised on success. Step 1 reserved (raspolozivo -=
+// cost), step 3 debited stanje, step 4 moved shares; here we verify the
+// invariants those steps left behind before flipping the contract status.
+//
+// SAGA-2 fix: previously this was a rubber-stamp status flip. Now we actually
+// re-load the buyer/seller accounts and the buyer/seller holdings (under FOR
+// UPDATE locks) and assert that no negative balances or quantities exist and
+// the buyer is now in possession of at least `amount` shares of the asset.
+func finalizeOtcExercise(tx *gorm.DB, contractID uint, buyerAccountID, sellerAccountID, sellerHoldingID, buyerID uint, buyerType string, assetID uint, amount, cost float64) error {
+	var buyerAccount repository.OtcAccountReference
+	if err := lockAccount(tx, buyerAccountID, &buyerAccount); err != nil {
+		return fmt.Errorf("finalize: lock buyer account: %w", err)
 	}
-	_ = cost // referenced for symmetry with the compensation signature
+	if buyerAccount.Stanje < 0 || buyerAccount.RaspolozivoStanje < 0 {
+		return fmt.Errorf("finalize: buyer account has negative balance after exercise")
+	}
+
+	var sellerAccount repository.OtcAccountReference
+	if err := lockAccount(tx, sellerAccountID, &sellerAccount); err != nil {
+		return fmt.Errorf("finalize: lock seller account: %w", err)
+	}
+	if sellerAccount.Stanje < 0 || sellerAccount.RaspolozivoStanje < 0 {
+		return fmt.Errorf("finalize: seller account has negative balance after exercise")
+	}
+
+	var sellerHolding models.PortfolioHoldingRecord
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&sellerHolding, sellerHoldingID).Error; err != nil {
+		return fmt.Errorf("finalize: load seller holding: %w", err)
+	}
+	if sellerHolding.Quantity < 0 || sellerHolding.ReservedQuantity < 0 {
+		return fmt.Errorf("finalize: seller holding has negative quantity/reservation")
+	}
+	if sellerHolding.ReservedQuantity > sellerHolding.Quantity {
+		return fmt.Errorf("finalize: seller reservation exceeds quantity")
+	}
+
+	var buyerHolding models.PortfolioHoldingRecord
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("user_id = ? AND user_type = ? AND asset_id = ?", buyerID, buyerType, assetID).
+		First(&buyerHolding).Error
+	if err != nil {
+		return fmt.Errorf("finalize: load buyer holding: %w", err)
+	}
+	if buyerHolding.Quantity < amount {
+		return fmt.Errorf("finalize: buyer holding (%.4f) is below contract amount (%.4f)", buyerHolding.Quantity, amount)
+	}
+
+	_ = cost // kept in the signature for symmetry with the compensation
 
 	now := time.Now().UTC()
 	result := tx.Model(&models.OtcContractRecord{}).

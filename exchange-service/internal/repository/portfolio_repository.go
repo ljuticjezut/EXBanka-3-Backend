@@ -126,42 +126,53 @@ func (r *PortfolioRepository) RecordBuyFill(userID uint, userType string, assetI
 // realized profit. Returns the realized profit for this fill.
 func (r *PortfolioRepository) RecordSellFill(userID uint, userType string, assetID uint, filledQty float64, sellPrice float64) (realizedProfit float64, err error) {
 	err = r.db.Transaction(func(tx *gorm.DB) error {
-		var h models.PortfolioHoldingRecord
-		if txErr := tx.Where("user_id = ? AND user_type = ? AND asset_id = ?", userID, userType, assetID).
-			First(&h).Error; txErr != nil {
-			return txErr
-		}
-
-		realizedProfit = (sellPrice - h.AvgBuyPrice) * filledQty
-		newQty := h.Quantity - filledQty
-		if newQty < 0 {
-			newQty = 0
-		}
-		if newQty < h.ReservedQuantity {
-			return fmt.Errorf("cannot sell reserved OTC quantity")
-		}
-		publicQuantity := h.PublicQuantity
-		isPublic := h.IsPublic
-		if publicQuantity > newQty {
-			publicQuantity = newQty
-		}
-		if newQty == 0 {
-			publicQuantity = 0
-			isPublic = false
-		}
-		if publicQuantity > 0 {
-			isPublic = true
-		}
-
-		return tx.Model(&h).Updates(map[string]interface{}{
-			"quantity":        newQty,
-			"realized_profit": h.RealizedProfit + realizedProfit,
-			"is_public":       isPublic,
-			"public_quantity": publicQuantity,
-			"updated_at":      time.Now().UTC(),
-		}).Error
+		profit, txErr := RecordSellFillTx(tx, userID, userType, assetID, filledQty, sellPrice)
+		realizedProfit = profit
+		return txErr
 	})
 	return
+}
+
+// RecordSellFillTx is the transaction-aware variant of RecordSellFill. Used by
+// fund-service so liquidation can run inside the withdrawal transaction (FUND-3).
+func RecordSellFillTx(tx *gorm.DB, userID uint, userType string, assetID uint, filledQty float64, sellPrice float64) (float64, error) {
+	var h models.PortfolioHoldingRecord
+	if err := tx.Where("user_id = ? AND user_type = ? AND asset_id = ?", userID, userType, assetID).
+		First(&h).Error; err != nil {
+		return 0, err
+	}
+
+	realizedProfit := (sellPrice - h.AvgBuyPrice) * filledQty
+	newQty := h.Quantity - filledQty
+	if newQty < 0 {
+		newQty = 0
+	}
+	if newQty < h.ReservedQuantity {
+		return 0, fmt.Errorf("cannot sell reserved OTC quantity")
+	}
+	publicQuantity := h.PublicQuantity
+	isPublic := h.IsPublic
+	if publicQuantity > newQty {
+		publicQuantity = newQty
+	}
+	if newQty == 0 {
+		publicQuantity = 0
+		isPublic = false
+	}
+	if publicQuantity > 0 {
+		isPublic = true
+	}
+
+	if err := tx.Model(&h).Updates(map[string]interface{}{
+		"quantity":        newQty,
+		"realized_profit": h.RealizedProfit + realizedProfit,
+		"is_public":       isPublic,
+		"public_quantity": publicQuantity,
+		"updated_at":      time.Now().UTC(),
+	}).Error; err != nil {
+		return 0, err
+	}
+	return realizedProfit, nil
 }
 
 // ExerciseOptionHolding zeroes out an option holding's quantity and adds the
