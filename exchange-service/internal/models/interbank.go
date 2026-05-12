@@ -13,6 +13,19 @@ const (
 	InterbankNegotiationRoleSeller = "seller"
 )
 
+const (
+	InterbankPendingTxStatusPending     = "pending"
+	InterbankPendingTxStatusCommitted   = "committed"
+	InterbankPendingTxStatusRolledBack  = "rolled_back"
+	InterbankPendingTxStatusRejected    = "rejected"
+)
+
+const (
+	InterbankOptionContractStatusValid     = "valid"
+	InterbankOptionContractStatusExercised = "exercised"
+	InterbankOptionContractStatusExpired   = "expired"
+)
+
 // InterbankInboundMessage is the audit + idempotence log for every
 // /interbank request we accept from a partner bank. The composite
 // (routing_number, locally_generated_key) is the protocol-defined
@@ -90,3 +103,105 @@ type InterbankOtcNegotiation struct {
 }
 
 func (InterbankOtcNegotiation) TableName() string { return "interbank_otc_negotiations" }
+
+// InterbankPendingTx is the per-TransactionID state machine row for an
+// inbound NEW_TX that we voted YES on but haven't yet seen a
+// COMMIT_TX/ROLLBACK_TX for. The protocol allows arbitrary delay between
+// the vote and the resolution, so we persist what we reserved + what
+// posting effect should fire on commit. Idempotence is enforced at the
+// /interbank handler layer by InterbankInboundMessage; this table is
+// the BUSINESS-layer record of "we promised to do X at commit time".
+//
+// The composite (TxRoutingNumber, TxID) is the protocol's
+// transactionId.routingNumber + transactionId.id — i.e. the
+// initiating bank's coordinates, which the protocol guarantees are
+// globally unique.
+type InterbankPendingTx struct {
+	ID uint `gorm:"primaryKey"`
+
+	TxRoutingNumber int    `gorm:"column:tx_routing_number;not null;uniqueIndex:idx_interbank_pending_tx_key,priority:1"`
+	TxID            string `gorm:"column:tx_id;type:varchar(64);not null;uniqueIndex:idx_interbank_pending_tx_key,priority:2"`
+
+	// PartnerRoutingNumber is the partner that POSTed the NEW_TX to us;
+	// it's almost always equal to TxRoutingNumber (the initiator is
+	// also the sender) but we record it separately to catch a
+	// hypothetical relay-through-third-party case during audit.
+	PartnerRoutingNumber int `gorm:"column:partner_routing_number;not null;index"`
+
+	// NegotiationRoutingNumber + NegotiationID let us find back the
+	// InterbankOtcNegotiation row that this NEW_TX is settling, so
+	// COMMIT_TX can flip it closed + write the option contract.
+	NegotiationRoutingNumber int    `gorm:"column:negotiation_routing_number;not null;index"`
+	NegotiationID            string `gorm:"column:negotiation_id;type:varchar(64);not null"`
+
+	// Resource-reservation snapshot. We persist what was reserved on
+	// NEW_TX so we can release it on ROLLBACK_TX even if the original
+	// envelope can't be replayed.
+	ReservedFromLocalID  string  `gorm:"column:reserved_from_local_id;type:varchar(64);not null"`
+	ReservedCurrency     string  `gorm:"column:reserved_currency;not null"`
+	ReservedAmount       float64 `gorm:"column:reserved_amount;not null"`
+
+	// Snapshot of the option contract terms — applied on COMMIT_TX to
+	// create the InterbankOptionContract row.
+	StockTicker          string  `gorm:"column:stock_ticker;not null"`
+	OptionAmount         float64 `gorm:"column:option_amount;not null"`
+	PricePerUnitCurrency string  `gorm:"column:price_per_unit_currency;not null"`
+	PricePerUnitAmount   float64 `gorm:"column:price_per_unit_amount;not null"`
+	SettlementDate       string  `gorm:"column:settlement_date;not null"`
+
+	// Identities of the two sides; the local side is our customer.
+	BuyerRoutingNumber  int    `gorm:"column:buyer_routing_number;not null"`
+	BuyerID             string `gorm:"column:buyer_id;type:varchar(64);not null"`
+	SellerRoutingNumber int    `gorm:"column:seller_routing_number;not null"`
+	SellerID            string `gorm:"column:seller_id;type:varchar(64);not null"`
+
+	Status string `gorm:"not null;default:'pending';index"`
+
+	CreatedAt   time.Time  `gorm:"not null"`
+	ResolvedAt  *time.Time `gorm:"column:resolved_at"`
+}
+
+func (InterbankPendingTx) TableName() string { return "interbank_pending_txs" }
+
+// InterbankOptionContract is our local record of an option contract
+// formed with a partner bank. We always sit on the BUYER side of these
+// rows — when we're the seller, the contract is just the negotiation
+// we've already closed plus a corresponding reservation in our local
+// portfolio.
+//
+// The contract's global identity is the negotiation's identity
+// (NegotiationRoutingNumber, NegotiationID) per spec §3.6.1 ("Set the
+// OTC option contract negotiationId to the ID of the negotiation that
+// lead to its creation. This ensures that the option pseudo-account is
+// always in the bank of the seller").
+type InterbankOptionContract struct {
+	ID uint `gorm:"primaryKey"`
+
+	NegotiationRoutingNumber int    `gorm:"column:negotiation_routing_number;not null;uniqueIndex:idx_interbank_option_contract_key,priority:1"`
+	NegotiationID            string `gorm:"column:negotiation_id;type:varchar(64);not null;uniqueIndex:idx_interbank_option_contract_key,priority:2"`
+
+	// The local user holding the option (always our side; this table
+	// is only written when WE are the buyer's bank). For the
+	// symmetric "we are the seller's bank" case the local-side
+	// effect lives in the existing portfolio holding reservation, not
+	// in this table.
+	BuyerLocalID string `gorm:"column:buyer_local_id;type:varchar(64);not null;index"`
+
+	SellerRoutingNumber int    `gorm:"column:seller_routing_number;not null"`
+	SellerID            string `gorm:"column:seller_id;type:varchar(64);not null"`
+
+	StockTicker          string  `gorm:"column:stock_ticker;not null;index"`
+	Amount               float64 `gorm:"not null"`
+	PricePerUnitCurrency string  `gorm:"column:price_per_unit_currency;not null"`
+	PricePerUnitAmount   float64 `gorm:"column:price_per_unit_amount;not null"`
+	PremiumCurrency      string  `gorm:"column:premium_currency;not null"`
+	PremiumAmount        float64 `gorm:"column:premium_amount;not null"`
+	SettlementDate       string  `gorm:"column:settlement_date;not null"`
+
+	Status string `gorm:"not null;default:'valid';index"`
+
+	CreatedAt time.Time `gorm:"not null"`
+	UpdatedAt time.Time `gorm:"not null"`
+}
+
+func (InterbankOptionContract) TableName() string { return "interbank_option_contracts" }

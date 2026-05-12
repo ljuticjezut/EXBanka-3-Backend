@@ -83,8 +83,11 @@ func main() {
 	)
 	ibInboundRepo := repository.NewInterbankInboundRepository(db)
 	ibNegRepo := repository.NewInterbankOtcRepository(db)
+	ibPendingRepo := repository.NewInterbankPendingTxRepository(db)
+	ibOptionContractRepo := repository.NewInterbankOptionContractRepository(db)
 	ibClient := interbank.NewClient(ibRegistry)
-	ibServer := interbank.NewServer(ibRegistry, ibInboundRepo, interbank.NoopProcessor{})
+	ibTxProcessor := interbank.NewOtcTxProcessor(ibRegistry, ibNegRepo, ibPendingRepo, ibOptionContractRepo)
+	ibServer := interbank.NewServer(ibRegistry, ibInboundRepo, ibTxProcessor)
 	ibOtcH := interbank.NewOTCHandler(ibRegistry, portfolioRepo, interbank.StubDisplayNameResolver{})
 	ibNegH := interbank.NewNegotiationsHandler(ibRegistry, ibNegRepo, ibClient)
 
