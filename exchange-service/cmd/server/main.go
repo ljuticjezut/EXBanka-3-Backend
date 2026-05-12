@@ -82,8 +82,12 @@ func main() {
 		"partner_count", len(ibRegistry.All()),
 	)
 	ibInboundRepo := repository.NewInterbankInboundRepository(db)
+	ibNegRepo := repository.NewInterbankOtcRepository(db)
+	ibPendingRepo := repository.NewInterbankPendingTxRepository(db)
+	ibOptionContractRepo := repository.NewInterbankOptionContractRepository(db)
 	ibClient := interbank.NewClient(ibRegistry)
-	ibServer := interbank.NewServer(ibRegistry, ibInboundRepo, interbank.NoopProcessor{})
+	ibTxProcessor := interbank.NewOtcTxProcessor(ibRegistry, ibNegRepo, ibPendingRepo, ibOptionContractRepo)
+	ibServer := interbank.NewServer(ibRegistry, ibInboundRepo, ibTxProcessor)
 	ibOtcH := interbank.NewOTCHandler(ibRegistry, portfolioRepo, interbank.StubDisplayNameResolver{})
 	_ = ibClient // outbound client is wired here, real callers land in a follow-up
 
