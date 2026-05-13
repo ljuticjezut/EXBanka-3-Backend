@@ -122,6 +122,16 @@ func (r *InterbankWalletRepository) Credit(tx *gorm.DB, localID, currency string
 	return nil
 }
 
+// LookupClientAccountID is the exported version of lockClientAccount,
+// for callers that need the account ID for downstream non-wallet
+// effects (e.g. setting the account_id on a new portfolio_holdings row
+// after cross-bank option exercise). Behaves identically to the
+// internal helper — locks the row FOR UPDATE under the caller's tx so
+// repeated calls within the same tx serialise on the same row.
+func (r *InterbankWalletRepository) LookupClientAccountID(tx *gorm.DB, localID, currency string) (uint, error) {
+	return r.lockClientAccount(tx, localID, currency)
+}
+
 // lockClientAccount finds and SELECT-FOR-UPDATE-locks the client's
 // first active account in the given currency — used for both buyer
 // debits (Reserve/Debit/Release) and seller credits (Credit). Returns

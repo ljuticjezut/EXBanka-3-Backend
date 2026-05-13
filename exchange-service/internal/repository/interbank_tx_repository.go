@@ -114,3 +114,44 @@ func (r *InterbankOptionContractRepository) Get(negotiationRoutingNumber int, ne
 	}
 	return &row, nil
 }
+
+// GetByID fetches a contract by autoincrement primary key. Used by the
+// buyer-side exercise endpoint where the FE poll knows the local id.
+func (r *InterbankOptionContractRepository) GetByID(id uint) (*models.InterbankOptionContract, error) {
+	var row models.InterbankOptionContract
+	err := r.db.First(&row, id).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &row, nil
+}
+
+// ListByBuyerLocalID returns the contracts owned by the given encoded
+// local participant id (the "client-N" form), newest first. Used by
+// the FE "my cross-bank options" view.
+func (r *InterbankOptionContractRepository) ListByBuyerLocalID(buyerLocalID string) ([]models.InterbankOptionContract, error) {
+	var rows []models.InterbankOptionContract
+	if err := r.db.
+		Where("buyer_local_id = ?", buyerLocalID).
+		Order("created_at DESC").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// MarkExercisedCAS flips a valid contract to exercised. Returns rows
+// affected so the caller can detect concurrent double-exercise.
+func (r *InterbankOptionContractRepository) MarkExercisedCAS(tx *gorm.DB, id uint) (int64, error) {
+	now := time.Now().UTC()
+	res := tx.Model(&models.InterbankOptionContract{}).
+		Where("id = ? AND status = ?", id, models.InterbankOptionContractStatusValid).
+		Updates(map[string]interface{}{
+			"status":     models.InterbankOptionContractStatusExercised,
+			"updated_at": now,
+		})
+	return res.RowsAffected, res.Error
+}
