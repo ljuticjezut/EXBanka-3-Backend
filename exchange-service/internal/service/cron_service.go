@@ -15,8 +15,19 @@ import (
 // StartCronJobs sets up and starts the cron scheduler for the exchange service.
 // portfolioSvc is created in main and shared with the portfolio HTTP handler.
 // sagaRetry is optional; when non-nil it is invoked every 5 minutes to retry
-// stuck SAGA compensations.
-func StartCronJobs(db *gorm.DB, portfolioSvc *PortfolioService, rateProvider RateProviderInterface, sagaRetry *SagaRetryRunner, fundSvc *FundService) *cron.Cron {
+// stuck SAGA compensations. interbankReconcile is optional; when non-nil it
+// is invoked every 2 minutes to retry stuck cross-bank payments.
+// publicStockCache is optional; when non-nil it is invoked every 5 minutes
+// to refresh partner /public-stock snapshots.
+func StartCronJobs(
+	db *gorm.DB,
+	portfolioSvc *PortfolioService,
+	rateProvider RateProviderInterface,
+	sagaRetry *SagaRetryRunner,
+	fundSvc *FundService,
+	interbankReconcile *InterbankReconcileRunner,
+	publicStockCache *PublicStockCacheRunner,
+) *cron.Cron {
 	c := cron.New()
 
 	// Refresh listing prices every 15 minutes.
@@ -54,6 +65,34 @@ func StartCronJobs(db *gorm.DB, portfolioSvc *PortfolioService, rateProvider Rat
 		})
 		if err != nil {
 			slog.Error("Failed to add SAGA retry cron job", "error", err)
+		}
+	}
+
+	// Inter-bank payment reconciliation: retransmit stuck NEW_TX and
+	// pending COMMIT_TX/ROLLBACK_TX messages every 2 minutes. The
+	// partner's idempotency by transactionId means replays are safe.
+	if interbankReconcile != nil {
+		_, err = c.AddFunc("@every 2m", func() {
+			interbankReconcile.Run()
+		})
+		if err != nil {
+			slog.Error("Failed to add inter-bank reconcile cron job", "error", err)
+		}
+	}
+
+	// Partner /public-stock cache refresh: fan out every 5 minutes so
+	// the local cross-bank OTC discovery page reads pre-fetched
+	// snapshots instead of paying the network cost on every request.
+	if publicStockCache != nil {
+		// Kick off one refresh immediately so the cache is warm on
+		// process start rather than waiting up to 5m for the first
+		// tick.
+		go publicStockCache.Run()
+		_, err = c.AddFunc("@every 5m", func() {
+			publicStockCache.Run()
+		})
+		if err != nil {
+			slog.Error("Failed to add public-stock cache cron job", "error", err)
 		}
 	}
 

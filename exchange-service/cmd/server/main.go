@@ -86,13 +86,23 @@ func main() {
 	ibPendingRepo := repository.NewInterbankPendingTxRepository(db)
 	ibOptionContractRepo := repository.NewInterbankOptionContractRepository(db)
 	ibWalletRepo := repository.NewInterbankWalletRepository(db)
+	ibPaymentRepo := repository.NewInterbankPaymentRepository(db)
+	ibPaymentWalletRepo := repository.NewInterbankPaymentWalletRepository(db)
 	ibClient := interbank.NewClient(ibRegistry)
-	ibTxProcessor := interbank.NewOtcTxProcessor(db, ibRegistry, ibNegRepo, ibPendingRepo, ibOptionContractRepo, ibWalletRepo)
-	ibServer := interbank.NewServer(ibRegistry, ibInboundRepo, ibTxProcessor)
+	ibExerciseRepo := repository.NewInterbankExerciseRepository(db)
+	ibOtcProcessor := interbank.NewOtcTxProcessor(db, ibRegistry, ibNegRepo, ibPendingRepo, ibOptionContractRepo, ibWalletRepo)
+	ibPaymentProcessor := interbank.NewPaymentTxProcessor(db, ibRegistry, ibPaymentRepo, ibPaymentWalletRepo)
+	ibExerciseProcessor := interbank.NewExerciseTxProcessor(db, ibRegistry, ibNegRepo, ibExerciseRepo, portfolioRepo, marketRepo, ibWalletRepo)
+	ibDispatchProcessor := interbank.NewDispatchTxProcessor(ibOtcProcessor, ibPaymentProcessor, ibExerciseProcessor, ibPaymentRepo, ibPendingRepo, ibExerciseRepo)
+	ibServer := interbank.NewServer(ibRegistry, ibInboundRepo, ibDispatchProcessor)
 	ibOtcH := interbank.NewOTCHandler(ibRegistry, portfolioRepo, interbank.StubDisplayNameResolver{})
 	ibNegH := interbank.NewNegotiationsHandler(ibRegistry, ibNegRepo, ibClient, db, ibWalletRepo)
 
-	cronScheduler := service.StartCronJobs(db, portfolioSvc, rateProvider, sagaRetryRunner, fundSvc)
+	ibReconcile := service.NewInterbankReconcileRunner(db, ibRegistry, ibClient, ibPaymentRepo, ibPaymentWalletRepo)
+	ibPublicStockRepo := repository.NewRemotePublicStockRepository(db)
+	ibPublicStockCache := service.NewPublicStockCacheRunner(ibRegistry, ibClient, ibPublicStockRepo)
+
+	cronScheduler := service.StartCronJobs(db, portfolioSvc, rateProvider, sagaRetryRunner, fundSvc, ibReconcile, ibPublicStockCache)
 
 	go func() {
 		slog.Info("Running market data seed in background...")
@@ -118,7 +128,11 @@ func main() {
 
 	fundH := handler.NewFundHTTPHandler(cfg, fundSvc)
 
-	ibOtcLocalH := handler.NewInterbankOtcHTTPHandler(cfg, ibRegistry, ibClient, ibNegRepo, ibNegH)
+	ibOtcLocalH := handler.NewInterbankOtcHTTPHandler(
+		cfg, ibRegistry, ibClient, ibNegRepo, ibNegH, ibPublicStockRepo,
+		ibOptionContractRepo, ibExerciseRepo, ibWalletRepo, portfolioRepo, marketRepo, db,
+	)
+	ibPaymentLocalH := handler.NewInterbankPaymentHTTPHandler(cfg, ibRegistry, ibClient, ibPaymentRepo, ibPaymentWalletRepo, db)
 
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(
@@ -169,6 +183,8 @@ func main() {
 	httpMux.Handle("/api/v1/funds", middleware.CORS(http.HandlerFunc(fundH.FundRoutes)))
 	httpMux.Handle("/api/v1/funds/", middleware.CORS(http.HandlerFunc(fundH.FundRoutes)))
 	httpMux.Handle("/api/v1/interbank-otc/", middleware.CORS(http.HandlerFunc(ibOtcLocalH.Routes)))
+	httpMux.Handle("/api/v1/payments/cross-bank", middleware.CORS(http.HandlerFunc(ibPaymentLocalH.Routes)))
+	httpMux.Handle("/api/v1/payments/cross-bank/", middleware.CORS(http.HandlerFunc(ibPaymentLocalH.Routes)))
 	// Inter-bank wire endpoint — partner-bank traffic, no CORS, X-Api-Key auth.
 	httpMux.Handle("/interbank", ibServer)
 	httpMux.Handle("/public-stock", interbank.AuthMiddleware(ibRegistry, http.HandlerFunc(ibOtcH.PublicStock)))

@@ -21,6 +21,19 @@ const (
 )
 
 const (
+	InterbankPaymentDirectionOutbound = "outbound"
+	InterbankPaymentDirectionInbound  = "inbound"
+)
+
+const (
+	InterbankPaymentStatusPending    = "pending"
+	InterbankPaymentStatusCommitted  = "committed"
+	InterbankPaymentStatusRolledBack = "rolled_back"
+	InterbankPaymentStatusRejected   = "rejected"
+	InterbankPaymentStatusFailed     = "failed"
+)
+
+const (
 	InterbankOptionContractStatusValid     = "valid"
 	InterbankOptionContractStatusExercised = "exercised"
 	InterbankOptionContractStatusExpired   = "expired"
@@ -205,3 +218,165 @@ type InterbankOptionContract struct {
 }
 
 func (InterbankOptionContract) TableName() string { return "interbank_option_contracts" }
+
+// InterbankPayment is the per-side state record for a cross-bank direct
+// payment (the 2-posting MONAS shape of NEW_TX, where both postings are
+// TxAccount type ACCOUNT — see protocol §2.6). One row per side: the
+// initiator persists Direction=outbound, the recipient persists
+// Direction=inbound. The (TxRoutingNumber, TxID) composite is the
+// protocol's transactionId — globally unique because the initiator owns
+// its routing number.
+//
+// State machine:
+//
+//	pending → committed     (NEW_TX YES → COMMIT_TX applied)
+//	pending → rolled_back   (we voted YES, then ROLLBACK_TX arrived)
+//	pending → rejected      (partner voted NO; sender-side only)
+//	pending → failed        (transport error after NEW_TX; sender-side only)
+type InterbankPayment struct {
+	ID uint `gorm:"primaryKey"`
+
+	TxRoutingNumber int    `gorm:"column:tx_routing_number;not null;uniqueIndex:idx_interbank_payment_key,priority:1"`
+	TxID            string `gorm:"column:tx_id;type:varchar(64);not null;uniqueIndex:idx_interbank_payment_key,priority:2"`
+
+	// Direction: outbound = we initiated this payment; inbound = a
+	// partner POSTed NEW_TX to us as the recipient bank.
+	Direction string `gorm:"not null;index"`
+
+	// PartnerRoutingNumber is the OTHER bank in this payment.
+	PartnerRoutingNumber int `gorm:"column:partner_routing_number;not null;index"`
+
+	// Wire posting snapshot — needed so commit/rollback can apply local
+	// effects without re-parsing the original NEW_TX envelope.
+	SenderAccountNumber    string  `gorm:"column:sender_account_number;type:varchar(32);not null"`
+	RecipientAccountNumber string  `gorm:"column:recipient_account_number;type:varchar(32);not null"`
+	Currency               string  `gorm:"not null"`
+	Amount                 float64 `gorm:"not null"`
+
+	// LocalAccountID is the account we touched (sender's for outbound,
+	// recipient's for inbound). Used for status lookups and audit.
+	LocalAccountID *uint `gorm:"column:local_account_id;index"`
+
+	// LocalClientID identifies the local owner (outbound only — we
+	// persist nothing about the partner's customer for inbound).
+	LocalClientID *uint `gorm:"column:local_client_id;index"`
+
+	// Tx metadata copied verbatim from the envelope.
+	Message        string `gorm:"type:text"`
+	PaymentCode    string `gorm:"column:payment_code"`
+	PaymentPurpose string `gorm:"column:payment_purpose;type:text"`
+
+	Status    string `gorm:"not null;default:'pending';index"`
+	LastError string `gorm:"column:last_error;type:text"`
+
+	// PartnerFinalisedAt is set when the terminal partner message
+	// (COMMIT_TX for committed; ROLLBACK_TX for failed) has been
+	// acknowledged. The reconciliation cron picks up resolved
+	// outbound rows where this is still null and replays the terminal
+	// message until the partner ACKs. Always nil for inbound rows —
+	// the receiver doesn't drive retransmission, the sender does.
+	PartnerFinalisedAt *time.Time `gorm:"column:partner_finalised_at"`
+
+	CreatedAt  time.Time  `gorm:"not null"`
+	UpdatedAt  time.Time  `gorm:"not null"`
+	ResolvedAt *time.Time `gorm:"column:resolved_at"`
+}
+
+func (InterbankPayment) TableName() string { return "interbank_payments" }
+
+// RemotePublicStockSnapshot caches one partner bank's /public-stock
+// response so the local frontend's "browse cross-bank OTC offers" page
+// doesn't pay a fan-out cost on every request. The reconciliation cron
+// refreshes one row per partner @every 5m. Stale-but-good rows are
+// returned with a `stale=true` flag rather than dropped, so a transient
+// partner outage doesn't blank the catalogue.
+//
+// PartnerRoutingNumber is the primary key — one row per partner.
+// PayloadJSON holds the raw interbank.PublicStocksResponse JSON to
+// keep the cache schema-agnostic; the handler unmarshals on read.
+type RemotePublicStockSnapshot struct {
+	PartnerRoutingNumber int    `gorm:"column:partner_routing_number;primaryKey"`
+	PayloadJSON          string `gorm:"column:payload_json;type:text"`
+	LastError            string `gorm:"column:last_error;type:text"`
+
+	FetchedAt time.Time `gorm:"column:fetched_at;not null"`
+	UpdatedAt time.Time `gorm:"not null"`
+}
+
+func (RemotePublicStockSnapshot) TableName() string { return "remote_public_stock_snapshots" }
+
+const (
+	InterbankExerciseDirectionOutbound = "outbound" // we are the buyer's bank initiating
+	InterbankExerciseDirectionInbound  = "inbound"  // we are the seller's bank receiving
+)
+
+const (
+	InterbankExerciseStatusPending    = "pending"
+	InterbankExerciseStatusCommitted  = "committed"
+	InterbankExerciseStatusRolledBack = "rolled_back"
+	InterbankExerciseStatusRejected   = "rejected"
+	InterbankExerciseStatusFailed     = "failed"
+)
+
+// InterbankPendingExercise tracks the per-side state of a cross-bank
+// option exercise (the 4-posting MONAS+STOCK transaction described in
+// protocol §2.7.2: debit OPTION pseudo for π·k cash, credit buyer for
+// π·k cash, credit OPTION pseudo for k stocks, debit buyer for k
+// stocks).
+//
+// Outbound (Direction='outbound'): we own the option, our bank is the
+// initiator. BuyerLocal* fields point at our own client + account that
+// will be debited the cash on COMMIT_TX. OptionContractID points at
+// the local InterbankOptionContract row being consumed.
+//
+// Inbound (Direction='inbound'): partner-bank's user holds the option
+// and exercises against us. On COMMIT_TX we reduce the seller's
+// holding by StockAmount and credit the seller's account by
+// CashAmount; the seller identity comes from the linked
+// InterbankOtcNegotiation row.
+type InterbankPendingExercise struct {
+	ID uint `gorm:"primaryKey"`
+
+	TxRoutingNumber int    `gorm:"column:tx_routing_number;not null;uniqueIndex:idx_interbank_pending_exercise_key,priority:1"`
+	TxID            string `gorm:"column:tx_id;type:varchar(64);not null;uniqueIndex:idx_interbank_pending_exercise_key,priority:2"`
+
+	Direction string `gorm:"not null;index"`
+
+	PartnerRoutingNumber int `gorm:"column:partner_routing_number;not null;index"`
+
+	// NegotiationRoutingNumber/ID identify the option being exercised.
+	// On inbound, this is also the join key to InterbankOtcNegotiation
+	// so we can find the seller. On outbound, it's the key to the
+	// InterbankOptionContract.
+	NegotiationRoutingNumber int    `gorm:"column:negotiation_routing_number;not null;index"`
+	NegotiationID            string `gorm:"column:negotiation_id;type:varchar(64);not null"`
+
+	StockTicker string  `gorm:"column:stock_ticker;not null"`
+	StockAmount float64 `gorm:"column:stock_amount;not null"`
+
+	PricePerUnitCurrency string  `gorm:"column:price_per_unit_currency;not null"`
+	PricePerUnitAmount   float64 `gorm:"column:price_per_unit_amount;not null"`
+
+	// CashAmount is StockAmount × PricePerUnitAmount, denormalised for
+	// idempotent ledger ops.
+	CashAmount float64 `gorm:"column:cash_amount;not null"`
+
+	BuyerRoutingNumber  int    `gorm:"column:buyer_routing_number;not null"`
+	BuyerID             string `gorm:"column:buyer_id;type:varchar(64);not null"`
+	SellerRoutingNumber int    `gorm:"column:seller_routing_number;not null"`
+	SellerID            string `gorm:"column:seller_id;type:varchar(64);not null"`
+
+	BuyerLocalAccountID *uint `gorm:"column:buyer_local_account_id;index"`
+	BuyerLocalClientID  *uint `gorm:"column:buyer_local_client_id;index"`
+	OptionContractID    *uint `gorm:"column:option_contract_id;index"`
+
+	Status    string `gorm:"not null;default:'pending';index"`
+	LastError string `gorm:"column:last_error;type:text"`
+
+	PartnerFinalisedAt *time.Time `gorm:"column:partner_finalised_at"`
+	CreatedAt          time.Time  `gorm:"not null"`
+	UpdatedAt          time.Time  `gorm:"not null"`
+	ResolvedAt         *time.Time `gorm:"column:resolved_at"`
+}
+
+func (InterbankPendingExercise) TableName() string { return "interbank_pending_exercises" }

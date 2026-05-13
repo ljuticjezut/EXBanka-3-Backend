@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/config"
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/interbank"
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/models"
@@ -26,12 +28,24 @@ import (
 // negotiation we're a party to). The partner-facing wire surface lives
 // in package interbank; this handler is the JWT-authenticated face of
 // it for our own UI.
+//
+// The buyer-side option-exercise routes (option-contracts list/get/
+// exercise) live on this handler too — they share the
+// /api/v1/interbank-otc/* prefix and the same client + JWT context.
+// The exercise implementation lives in interbank_exercise_http_handler.go.
 type InterbankOtcHTTPHandler struct {
-	cfg         *config.Config
-	registry    *interbank.Registry
-	client      *interbank.Client
-	negRepo     *repository.InterbankOtcRepository
-	negsHandler *interbank.NegotiationsHandler
+	cfg              *config.Config
+	registry         *interbank.Registry
+	client           *interbank.Client
+	negRepo          *repository.InterbankOtcRepository
+	negsHandler      *interbank.NegotiationsHandler
+	stockCacheRepo   *repository.RemotePublicStockRepository
+	contractRepo     *repository.InterbankOptionContractRepository
+	exerciseRepo     *repository.InterbankExerciseRepository
+	walletRepo       *repository.InterbankWalletRepository
+	portfolioRepo    *repository.PortfolioRepository
+	marketRepo       *repository.MarketRepository
+	db               *gorm.DB
 }
 
 func NewInterbankOtcHTTPHandler(
@@ -40,14 +54,44 @@ func NewInterbankOtcHTTPHandler(
 	client *interbank.Client,
 	negRepo *repository.InterbankOtcRepository,
 	negsHandler *interbank.NegotiationsHandler,
+	stockCacheRepo *repository.RemotePublicStockRepository,
+	contractRepo *repository.InterbankOptionContractRepository,
+	exerciseRepo *repository.InterbankExerciseRepository,
+	walletRepo *repository.InterbankWalletRepository,
+	portfolioRepo *repository.PortfolioRepository,
+	marketRepo *repository.MarketRepository,
+	db *gorm.DB,
 ) *InterbankOtcHTTPHandler {
 	return &InterbankOtcHTTPHandler{
-		cfg:         cfg,
-		registry:    registry,
-		client:      client,
-		negRepo:     negRepo,
-		negsHandler: negsHandler,
+		cfg:            cfg,
+		registry:       registry,
+		client:         client,
+		negRepo:        negRepo,
+		negsHandler:    negsHandler,
+		stockCacheRepo: stockCacheRepo,
+		contractRepo:   contractRepo,
+		exerciseRepo:   exerciseRepo,
+		walletRepo:     walletRepo,
+		portfolioRepo:  portfolioRepo,
+		marketRepo:     marketRepo,
+		db:             db,
 	}
+}
+
+// publicStockStaleness is the cutoff beyond which a cached snapshot is
+// marked `stale=true` in the response. The cron refreshes @every 5m, so
+// 12m gives a comfortable two-tick window before stale flags appear.
+const publicStockStaleness = 12 * time.Minute
+
+// partnerStockResult is the per-partner intermediate for listPublicStocks.
+// Used by both fanOutLive (live fan-out) and readCached (cache reads) so
+// the merging loop in listPublicStocks doesn't care which source produced
+// the data.
+type partnerStockResult struct {
+	code   interbank.RoutingNumber
+	stocks interbank.PublicStocksResponse
+	err    error
+	stale  bool
 }
 
 // Routes dispatches /api/v1/interbank-otc/* to the right method.
@@ -102,15 +146,50 @@ func (h *InterbankOtcHTTPHandler) Routes(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		h.acceptNegotiation(w, r, routing, id)
+	case len(parts) == 1 && parts[0] == "option-contracts":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.listOptionContracts(w, r)
+	case len(parts) == 2 && parts[0] == "option-contracts":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		id, err := strconv.ParseUint(parts[1], 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"message": "contract id must be numeric"})
+			return
+		}
+		h.getOptionContract(w, r, uint(id))
+	case len(parts) == 3 && parts[0] == "option-contracts" && parts[2] == "exercise":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		id, err := strconv.ParseUint(parts[1], 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"message": "contract id must be numeric"})
+			return
+		}
+		h.exerciseOptionContract(w, r, uint(id))
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-// listPublicStocks aggregates the partner /public-stock responses into a
-// single payload the local frontend can render. Partner errors are
-// reported per-bank rather than failing the whole call — one slow
-// partner shouldn't block the catalogue.
+// listPublicStocks aggregates partner /public-stock data into a single
+// payload the local frontend can render. By default the data comes
+// from the remote_public_stock_snapshots cache (refreshed by the
+// PublicStockCacheRunner cron). Passing ?live=true bypasses the cache
+// and does a parallel fan-out for callers that need fresh data right
+// now (e.g. an explicit "refresh" button).
+//
+// Per-partner errors are reported per-bank rather than failing the
+// whole call — one slow or down partner shouldn't blank the catalogue.
+// Cached responses include a `stale=true` flag when the snapshot is
+// older than publicStockStaleness.
 func (h *InterbankOtcHTTPHandler) listPublicStocks(w http.ResponseWriter, r *http.Request) {
 	claims, ok := requireAuthenticatedHTTP(w, r, h.cfg)
 	if !ok {
@@ -120,29 +199,28 @@ func (h *InterbankOtcHTTPHandler) listPublicStocks(w http.ResponseWriter, r *htt
 		return
 	}
 
+	live := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("live")), "true")
+
 	partners := h.registry.All()
-	type partnerResult struct {
-		code   interbank.RoutingNumber
-		stocks interbank.PublicStocksResponse
-		err    error
+	bankNames := map[interbank.RoutingNumber]string{}
+	for _, p := range partners {
+		bankNames[p.Code] = p.DisplayName
 	}
-	results := make([]partnerResult, len(partners))
 
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancel()
-
-	var wg sync.WaitGroup
-	for i := range partners {
-		i := i
-		p := partners[i]
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			stocks, err := h.client.FetchPublicStock(ctx, p.Code)
-			results[i] = partnerResult{code: p.Code, stocks: stocks, err: err}
-		}()
+	var results []partnerStockResult
+	if live || h.stockCacheRepo == nil {
+		results = h.fanOutLive(r.Context(), partners)
+	} else {
+		liveResults, fellBack := h.readCached(partners)
+		if fellBack {
+			// No cache row exists at all — first run, no cron has
+			// fired yet. Fan out live so the caller doesn't see an
+			// empty list on cold start.
+			results = h.fanOutLive(r.Context(), partners)
+		} else {
+			results = liveResults
+		}
 	}
-	wg.Wait()
 
 	type stockResp struct {
 		Ticker  string `json:"ticker"`
@@ -153,18 +231,19 @@ func (h *InterbankOtcHTTPHandler) listPublicStocks(w http.ResponseWriter, r *htt
 			Amount            float64 `json:"amount"`
 		} `json:"sellers"`
 	}
-	bankNames := map[interbank.RoutingNumber]string{}
-	for _, p := range partners {
-		bankNames[p.Code] = p.DisplayName
-	}
 	out := map[string]*stockResp{}
 	partnerErrors := map[string]string{}
+	partnerStale := map[string]bool{}
 	for _, res := range results {
+		key := strconv.Itoa(int(res.code))
 		if res.err != nil {
-			partnerErrors[strconv.Itoa(int(res.code))] = res.err.Error()
+			partnerErrors[key] = res.err.Error()
 			slog.Warn("interbank-otc: partner /public-stock failed",
 				"partner", res.code, "error", res.err)
 			continue
+		}
+		if res.stale {
+			partnerStale[key] = true
 		}
 		for _, ps := range res.stocks {
 			entry, ok := out[ps.Stock.Ticker]
@@ -192,11 +271,98 @@ func (h *InterbankOtcHTTPHandler) listPublicStocks(w http.ResponseWriter, r *htt
 	for _, e := range out {
 		stocks = append(stocks, *e)
 	}
+
+	source := "cache"
+	if live || h.stockCacheRepo == nil {
+		source = "live"
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"stocks":        stocks,
 		"count":         len(stocks),
 		"partnerErrors": partnerErrors,
+		"partnerStale":  partnerStale,
+		"source":        source,
 	})
+}
+
+// fanOutLive runs the original parallel /public-stock fan-out. Used
+// for ?live=true and as a cold-start fallback when the cache is empty.
+func (h *InterbankOtcHTTPHandler) fanOutLive(reqCtx context.Context, partners []interbank.PartnerBank) []partnerStockResult {
+	ctx, cancel := context.WithTimeout(reqCtx, 15*time.Second)
+	defer cancel()
+
+	results := make([]partnerStockResult, len(partners))
+	var wg sync.WaitGroup
+	for i := range partners {
+		i := i
+		p := partners[i]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stocks, err := h.client.FetchPublicStock(ctx, p.Code)
+			results[i] = partnerStockResult{code: p.Code, stocks: stocks, err: err}
+		}()
+	}
+	wg.Wait()
+	return results
+}
+
+// readCached returns per-partner cached snapshots. Marks a result
+// stale when the snapshot is older than publicStockStaleness. Returns
+// fellBack=true when zero snapshots exist at all (cold start) — the
+// caller falls back to a live fan-out in that case so the first user
+// after process start doesn't see an empty catalogue.
+func (h *InterbankOtcHTTPHandler) readCached(partners []interbank.PartnerBank) ([]partnerStockResult, bool) {
+	rows, err := h.stockCacheRepo.List()
+	if err != nil {
+		slog.Error("interbank-otc: reading public-stock cache failed", "err", err)
+		return nil, true
+	}
+	if len(rows) == 0 {
+		return nil, true
+	}
+	byPartner := map[int]*models.RemotePublicStockSnapshot{}
+	for i := range rows {
+		byPartner[rows[i].PartnerRoutingNumber] = &rows[i]
+	}
+	now := time.Now().UTC()
+	results := make([]partnerStockResult, 0, len(partners))
+	for _, p := range partners {
+		row := byPartner[int(p.Code)]
+		if row == nil {
+			results = append(results, partnerStockResult{
+				code: p.Code,
+				err:  fmt.Errorf("no cached snapshot yet"),
+			})
+			continue
+		}
+		stale := now.Sub(row.FetchedAt) > publicStockStaleness
+		if row.LastError != "" && row.PayloadJSON == "" {
+			results = append(results, partnerStockResult{
+				code:  p.Code,
+				err:   fmt.Errorf("partner cache error: %s", row.LastError),
+				stale: stale,
+			})
+			continue
+		}
+		var stocks interbank.PublicStocksResponse
+		if row.PayloadJSON != "" {
+			if err := json.Unmarshal([]byte(row.PayloadJSON), &stocks); err != nil {
+				results = append(results, partnerStockResult{
+					code:  p.Code,
+					err:   fmt.Errorf("decoding cached snapshot: %w", err),
+					stale: stale,
+				})
+				continue
+			}
+		}
+		results = append(results, partnerStockResult{
+			code:   p.Code,
+			stocks: stocks,
+			stale:  stale,
+		})
+	}
+	return results, false
 }
 
 // listNegotiations returns every cross-bank negotiation the caller is a
