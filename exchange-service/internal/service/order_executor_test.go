@@ -10,90 +10,173 @@ func mkOrder(orderType, direction string) *models.OrderRecord {
 	return &models.OrderRecord{OrderType: orderType, Direction: direction}
 }
 
-func TestConditionsMet_Market(t *testing.T) {
-	if !conditionsMet(mkOrder("market", "buy"), &models.MarketListingRecord{}) {
-		t.Error("market should always meet conditions")
+func TestEvaluateOrder_Market(t *testing.T) {
+	if !evaluateOrder(mkOrder("market", "buy"), &models.MarketListingRecord{}).fillNow {
+		t.Error("market should always fill")
 	}
 }
 
-func TestConditionsMet_LimitBuy(t *testing.T) {
+func TestEvaluateOrder_LimitBuy(t *testing.T) {
 	o := mkOrder("limit", "buy")
 	o.LimitValue = ptrFloat(100)
-	if !conditionsMet(o, &models.MarketListingRecord{Ask: 99}) {
-		t.Error("buy limit should trigger when ask<=limit")
+	if !evaluateOrder(o, &models.MarketListingRecord{Ask: 99}).fillNow {
+		t.Error("buy limit should fill when ask<=limit")
 	}
-	if conditionsMet(o, &models.MarketListingRecord{Ask: 101}) {
-		t.Error("buy limit should NOT trigger when ask>limit")
+	if evaluateOrder(o, &models.MarketListingRecord{Ask: 101}).fillNow {
+		t.Error("buy limit should NOT fill when ask>limit")
 	}
 }
 
-func TestConditionsMet_LimitSell(t *testing.T) {
+func TestEvaluateOrder_LimitSell(t *testing.T) {
 	o := mkOrder("limit", "sell")
 	o.LimitValue = ptrFloat(100)
-	if !conditionsMet(o, &models.MarketListingRecord{Bid: 101}) {
-		t.Error("sell limit should trigger when bid>=limit")
+	if !evaluateOrder(o, &models.MarketListingRecord{Bid: 101}).fillNow {
+		t.Error("sell limit should fill when bid>=limit")
 	}
-	if conditionsMet(o, &models.MarketListingRecord{Bid: 99}) {
-		t.Error("sell limit should NOT trigger when bid<limit")
+	if evaluateOrder(o, &models.MarketListingRecord{Bid: 99}).fillNow {
+		t.Error("sell limit should NOT fill when bid<limit")
 	}
 }
 
-func TestConditionsMet_StopBuy(t *testing.T) {
+func TestEvaluateOrder_StopBuy(t *testing.T) {
 	o := mkOrder("stop", "buy")
 	o.StopValue = ptrFloat(100)
-	if !conditionsMet(o, &models.MarketListingRecord{Ask: 101}) {
-		t.Error("buy stop should trigger when ask>stop")
+	if !evaluateOrder(o, &models.MarketListingRecord{Ask: 101}).fillNow {
+		t.Error("buy stop should fill when ask>stop")
 	}
-	if conditionsMet(o, &models.MarketListingRecord{Ask: 99}) {
-		t.Error("buy stop should NOT trigger when ask<=stop")
+	if evaluateOrder(o, &models.MarketListingRecord{Ask: 99}).fillNow {
+		t.Error("buy stop should NOT fill when ask<=stop")
 	}
 }
 
-func TestConditionsMet_StopSell(t *testing.T) {
+func TestEvaluateOrder_StopSell(t *testing.T) {
 	o := mkOrder("stop", "sell")
 	o.StopValue = ptrFloat(100)
-	if !conditionsMet(o, &models.MarketListingRecord{Bid: 99}) {
-		t.Error("sell stop should trigger when bid<stop")
+	if !evaluateOrder(o, &models.MarketListingRecord{Bid: 99}).fillNow {
+		t.Error("sell stop should fill when bid<stop")
 	}
-	if conditionsMet(o, &models.MarketListingRecord{Bid: 101}) {
-		t.Error("sell stop should NOT trigger when bid>=stop")
+	if evaluateOrder(o, &models.MarketListingRecord{Bid: 101}).fillNow {
+		t.Error("sell stop should NOT fill when bid>=stop")
 	}
 }
 
-func TestConditionsMet_StopLimitBuy(t *testing.T) {
+// stop_limit BUY: stop_value=100 arms the order (when ask >= 100), then it
+// behaves as a limit order with limit_value=105 (fills while ask <= 105).
+func TestEvaluateOrder_StopLimitBuy_ArmsAndFillsInsideWindow(t *testing.T) {
 	o := mkOrder("stop_limit", "buy")
 	o.StopValue = ptrFloat(100)
 	o.LimitValue = ptrFloat(105)
-	// triggered: 100 <= ask <= 105
-	if !conditionsMet(o, &models.MarketListingRecord{Ask: 102}) {
-		t.Error("expected triggered")
-	}
-	if conditionsMet(o, &models.MarketListingRecord{Ask: 99}) {
-		t.Error("ask below stop should not trigger")
-	}
-	if conditionsMet(o, &models.MarketListingRecord{Ask: 110}) {
-		t.Error("ask above limit should not trigger")
+
+	// Ask=102 crosses stop and is inside limit window — should arm + fill on this tick.
+	eval := evaluateOrder(o, &models.MarketListingRecord{Ask: 102})
+	if !eval.fillNow || !eval.justTriggered {
+		t.Errorf("expected fillNow=true justTriggered=true, got %+v", eval)
 	}
 }
 
-func TestConditionsMet_StopLimitSell(t *testing.T) {
+func TestEvaluateOrder_StopLimitBuy_BelowStopDoesNothing(t *testing.T) {
+	o := mkOrder("stop_limit", "buy")
+	o.StopValue = ptrFloat(100)
+	o.LimitValue = ptrFloat(105)
+
+	eval := evaluateOrder(o, &models.MarketListingRecord{Ask: 99})
+	if eval.fillNow || eval.justTriggered {
+		t.Errorf("ask below stop should neither arm nor fill, got %+v", eval)
+	}
+}
+
+// Critical case: ask gaps above the limit. The order arms (stop crossed) but
+// does not fill — it sits waiting for ask to drop back into the limit window.
+func TestEvaluateOrder_StopLimitBuy_GapsAboveLimitArmsButDoesNotFill(t *testing.T) {
+	o := mkOrder("stop_limit", "buy")
+	o.StopValue = ptrFloat(100)
+	o.LimitValue = ptrFloat(105)
+
+	eval := evaluateOrder(o, &models.MarketListingRecord{Ask: 110})
+	if eval.fillNow {
+		t.Errorf("ask above limit must not fill yet, got fillNow=true")
+	}
+	if !eval.justTriggered {
+		t.Errorf("ask above stop should arm the latch even if outside limit window")
+	}
+}
+
+// Once armed, the latch persists: on a later tick the order fills as a limit
+// order EVEN IF the ask is now below the stop value (the latch is sticky).
+func TestEvaluateOrder_StopLimitBuy_LatchSticksAfterPriceRetreats(t *testing.T) {
+	o := mkOrder("stop_limit", "buy")
+	o.StopValue = ptrFloat(100)
+	o.LimitValue = ptrFloat(105)
+	o.StopTriggered = true // already armed from a prior tick
+
+	// Ask=98 is below the stop, but since the latch is sticky, the order behaves
+	// as a pure limit order and fills (ask <= limit_value).
+	eval := evaluateOrder(o, &models.MarketListingRecord{Ask: 98})
+	if !eval.fillNow {
+		t.Errorf("latched order should fill while ask<=limit, got fillNow=false")
+	}
+	if eval.justTriggered {
+		t.Errorf("already-armed order should not signal justTriggered, got true")
+	}
+}
+
+// stop_limit SELL: stop_value=100 arms when bid <= 100, then limit_value=95
+// gates the fill (sell while bid >= 95).
+func TestEvaluateOrder_StopLimitSell_ArmsAndFillsInsideWindow(t *testing.T) {
 	o := mkOrder("stop_limit", "sell")
 	o.StopValue = ptrFloat(100)
 	o.LimitValue = ptrFloat(95)
-	if !conditionsMet(o, &models.MarketListingRecord{Bid: 97}) {
-		t.Error("expected triggered")
-	}
-	if conditionsMet(o, &models.MarketListingRecord{Bid: 105}) {
-		t.Error("bid above stop should not trigger sell")
-	}
-	if conditionsMet(o, &models.MarketListingRecord{Bid: 90}) {
-		t.Error("bid below limit should not trigger")
+
+	eval := evaluateOrder(o, &models.MarketListingRecord{Bid: 97})
+	if !eval.fillNow || !eval.justTriggered {
+		t.Errorf("expected fillNow=true justTriggered=true, got %+v", eval)
 	}
 }
 
-func TestConditionsMet_UnknownType(t *testing.T) {
-	if conditionsMet(mkOrder("foo", "buy"), &models.MarketListingRecord{}) {
-		t.Error("unknown order type should not meet conditions")
+func TestEvaluateOrder_StopLimitSell_AboveStopDoesNothing(t *testing.T) {
+	o := mkOrder("stop_limit", "sell")
+	o.StopValue = ptrFloat(100)
+	o.LimitValue = ptrFloat(95)
+
+	eval := evaluateOrder(o, &models.MarketListingRecord{Bid: 105})
+	if eval.fillNow || eval.justTriggered {
+		t.Errorf("bid above stop should neither arm nor fill, got %+v", eval)
+	}
+}
+
+func TestEvaluateOrder_StopLimitSell_GapsBelowLimitArmsButDoesNotFill(t *testing.T) {
+	o := mkOrder("stop_limit", "sell")
+	o.StopValue = ptrFloat(100)
+	o.LimitValue = ptrFloat(95)
+
+	eval := evaluateOrder(o, &models.MarketListingRecord{Bid: 90})
+	if eval.fillNow {
+		t.Errorf("bid below limit must not fill yet, got fillNow=true")
+	}
+	if !eval.justTriggered {
+		t.Errorf("bid below stop should arm the latch even if outside limit window")
+	}
+}
+
+func TestEvaluateOrder_StopLimitSell_LatchSticksAfterPriceRecovers(t *testing.T) {
+	o := mkOrder("stop_limit", "sell")
+	o.StopValue = ptrFloat(100)
+	o.LimitValue = ptrFloat(95)
+	o.StopTriggered = true
+
+	eval := evaluateOrder(o, &models.MarketListingRecord{Bid: 102})
+	if !eval.fillNow {
+		t.Errorf("latched sell order should fill while bid>=limit, got fillNow=false")
+	}
+	if eval.justTriggered {
+		t.Errorf("already-armed order should not signal justTriggered, got true")
+	}
+}
+
+func TestEvaluateOrder_UnknownType(t *testing.T) {
+	eval := evaluateOrder(mkOrder("foo", "buy"), &models.MarketListingRecord{})
+	if eval.fillNow || eval.justTriggered {
+		t.Error("unknown order type should be inert")
 	}
 }
 

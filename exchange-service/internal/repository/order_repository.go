@@ -315,3 +315,66 @@ func (r *OrderRepository) GetAccountBalance(accountID uint) (balance float64, cu
 	err = row.Scan(&balance, &currencyKod)
 	return
 }
+
+// SetStopTriggered latches the stop_triggered flag on a stop_limit order so the
+// executor no longer re-evaluates the stop condition. Once set the order behaves
+// as a pure limit order even if the price oscillates back across the stop.
+func (r *OrderRepository) SetStopTriggered(orderID uint) error {
+	return r.db.Model(&models.OrderRecord{}).
+		Where("id = ?", orderID).
+		Updates(map[string]interface{}{
+			"stop_triggered":    true,
+			"last_modification": time.Now().UTC(),
+		}).Error
+}
+
+// SetMarginLoan persists the outstanding bank-fronted balance for a margin order.
+// Called from OrderService.CreateOrder right after the order is created.
+func (r *OrderRepository) SetMarginLoan(orderID uint, amount float64) error {
+	return r.db.Model(&models.OrderRecord{}).
+		Where("id = ?", orderID).
+		UpdateColumn("margin_loan", amount).Error
+}
+
+// ListOutstandingMarginLoansForUserAsset returns buy orders for the given
+// user+asset that still carry a non-zero margin loan, ordered oldest-first so
+// proceeds repay FIFO.
+func (r *OrderRepository) ListOutstandingMarginLoansForUserAsset(userID uint, userType string, assetID uint) ([]models.OrderRecord, error) {
+	var records []models.OrderRecord
+	err := r.db.
+		Where("user_id = ? AND user_type = ? AND asset_id = ? AND direction = ? AND is_margin = ? AND margin_loan > 0",
+			userID, userType, assetID, "buy", true).
+		Order("created_at ASC, id ASC").
+		Find(&records).Error
+	if err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+// ReduceMarginLoan subtracts amount from the order's margin_loan, clamping at
+// zero. Returns the actual amount applied (≤ amount when the loan was smaller).
+func (r *OrderRepository) ReduceMarginLoan(orderID uint, amount float64) (float64, error) {
+	if amount <= 0 {
+		return 0, nil
+	}
+	var applied float64
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		var order models.OrderRecord
+		if err := tx.Select("id, margin_loan").First(&order, orderID).Error; err != nil {
+			return err
+		}
+		applied = amount
+		if applied > order.MarginLoan {
+			applied = order.MarginLoan
+		}
+		if applied <= 0 {
+			applied = 0
+			return nil
+		}
+		return tx.Model(&models.OrderRecord{}).
+			Where("id = ?", orderID).
+			UpdateColumn("margin_loan", gorm.Expr("margin_loan - ?", applied)).Error
+	})
+	return applied, err
+}

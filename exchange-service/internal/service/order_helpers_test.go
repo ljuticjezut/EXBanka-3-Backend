@@ -261,6 +261,60 @@ func TestCalcCommission_StopLimitUsesLimitRate(t *testing.T) {
 	}
 }
 
+// --- computeInitialMarginCost (Initial Margin Cost = MaintenanceMargin × 1.1) ---
+
+func TestComputeInitialMarginCost_Stock(t *testing.T) {
+	svc := &OrderService{}
+	listing := &models.MarketListingRecord{Type: "stock"}
+	// 10 shares × $100 × 50% (stock rate) × 1.1 (IMC buffer) × 1.0 (same currency) = 550
+	got, err := svc.computeInitialMarginCost(listing, 10, 1, 100, 1.0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !almostEqual(got, 550) {
+		t.Errorf("expected stock IMC=550, got %v", got)
+	}
+}
+
+func TestComputeInitialMarginCost_StockWithContractSizeAndFx(t *testing.T) {
+	svc := &OrderService{}
+	listing := &models.MarketListingRecord{Type: "stock"}
+	// 5 contracts × 100 shares × $50 × 50% × 1.1 × 1.2 (fx) = 16500
+	got, err := svc.computeInitialMarginCost(listing, 5, 100, 50, 1.2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !almostEqual(got, 16500) {
+		t.Errorf("expected 16500, got %v", got)
+	}
+}
+
+func TestComputeInitialMarginCost_Forex(t *testing.T) {
+	svc := &OrderService{}
+	listing := &models.MarketListingRecord{Type: "forex"}
+	// 1000 units × 1 × $1.10 × 10% (forex rate) × 1.1 × 1.0 = 121
+	got, err := svc.computeInitialMarginCost(listing, 1000, 1, 1.10, 1.0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !almostEqual(got, 121) {
+		t.Errorf("expected forex IMC=121, got %v", got)
+	}
+}
+
+func TestComputeInitialMarginCost_Futures(t *testing.T) {
+	svc := &OrderService{}
+	listing := &models.MarketListingRecord{Type: "futures"}
+	// 2 × 50 × $200 × 10% × 1.1 × 1.0 = 2200
+	got, err := svc.computeInitialMarginCost(listing, 2, 50, 200, 1.0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !almostEqual(got, 2200) {
+		t.Errorf("expected futures IMC=2200, got %v", got)
+	}
+}
+
 // --- round2 ---
 
 func TestRound2(t *testing.T) {

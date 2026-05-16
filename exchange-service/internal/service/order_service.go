@@ -112,10 +112,21 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 
 	// Margin orders: verify the account has enough available balance to cover
 	// the Initial Margin Cost (MaintenanceMargin × 1.1) before accepting the order.
+	// We capture the IMC so the buy debit path below uses it instead of the full price.
+	var initialMarginCost float64
 	if input.IsMargin {
-		if err := s.validateMargin(input.AccountID, listing, input.Quantity, contractSize, pricePerUnit, currencyRate); err != nil {
+		imc, err := s.computeInitialMarginCost(listing, input.Quantity, contractSize, pricePerUnit, currencyRate)
+		if err != nil {
 			return nil, err
 		}
+		balance, _, err := s.orderRepo.GetAccountBalance(input.AccountID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read account balance: %w", err)
+		}
+		if balance < imc {
+			return nil, fmt.Errorf("insufficient balance for margin order: need %.2f, have %.2f", imc, balance)
+		}
+		initialMarginCost = imc
 	}
 
 	// Convert totalPrice to RSD for agent limit checks (limits are always in RSD).
@@ -134,11 +145,22 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 		}
 	}
 
-	// For buy orders, debit the full order value + commission from the account upfront,
-	// converted to the account's currency if it differs from the asset's currency.
+	// For buy orders, debit the account upfront.
+	//   Non-margin: full order value + commission, in the account's currency.
+	//   Margin:     only the Initial Margin Cost; the rest is fronted by the bank
+	//               and recorded as MarginLoan on the order, repaid from sell proceeds.
+	var marginLoan float64
 	if input.Direction == "buy" {
-		totalDebit := round2((totalPrice + commission) * currencyRate)
-		if err := s.orderRepo.DebitAccount(input.AccountID, totalDebit); err != nil {
+		totalCost := round2((totalPrice + commission) * currencyRate)
+		debit := totalCost
+		if input.IsMargin {
+			debit = initialMarginCost
+			marginLoan = round2(totalCost - initialMarginCost)
+			if marginLoan < 0 {
+				marginLoan = 0
+			}
+		}
+		if err := s.orderRepo.DebitAccount(input.AccountID, debit); err != nil {
 			return nil, fmt.Errorf("insufficient funds: %w", err)
 		}
 	}
@@ -169,6 +191,7 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 		CurrencyRate:      currencyRate,
 		AfterHours:        input.AfterHours,
 		AccountID:         input.AccountID,
+		MarginLoan:        marginLoan,
 		LastModification:  now,
 		CreatedAt:         now,
 	}
@@ -284,12 +307,23 @@ func (s *OrderService) DeclineOrder(orderID, supervisorID uint) error {
 		return fmt.Errorf("order is not pending (status: %s)", order.Status)
 	}
 
-	// Refund the full debit that was taken on creation, converting back to account currency.
+	// Refund what was actually debited on creation, converting back to account currency.
+	//   Non-margin: full order value + commission.
+	//   Margin:     only the IMC (total cost - margin loan); the loan was bank-funded.
 	if order.Direction == "buy" {
 		totalPrice := round2(float64(order.Quantity) * float64(order.ContractSize) * order.PricePerUnit)
-		refund := round2((totalPrice + order.Commission) * order.CurrencyRate)
+		refund := round2((totalPrice+order.Commission)*order.CurrencyRate - order.MarginLoan)
+		if refund < 0 {
+			refund = 0
+		}
 		if err := s.orderRepo.RefundToAccount(order.AccountID, refund); err != nil {
 			return fmt.Errorf("failed to refund account on decline: %w", err)
+		}
+		// Discharge the (now unused) margin loan since the order was declined.
+		if order.MarginLoan > 0 {
+			if err := s.orderRepo.SetMarginLoan(order.ID, 0); err != nil {
+				return fmt.Errorf("failed to clear margin loan on decline: %w", err)
+			}
 		}
 	}
 
@@ -318,7 +352,25 @@ func (s *OrderService) CancelOrder(orderID, requesterID uint, newRemaining int64
 	}
 
 	cancelledQty := order.RemainingPortions - newRemaining
-	refundAmount := round2(float64(cancelledQty) * float64(order.ContractSize) * order.PricePerUnit * order.CurrencyRate)
+	cancelledValue := round2(float64(cancelledQty) * float64(order.ContractSize) * order.PricePerUnit * order.CurrencyRate)
+	refundAmount := cancelledValue
+
+	// For margin buys, only the proportional share of the IMC was actually debited from
+	// the user — the rest is bank-funded margin loan. Refund only the user's share and
+	// reduce the outstanding margin loan by the bank's share of the cancelled qty.
+	if order.Direction == "buy" && order.IsMargin && order.RemainingPortions > 0 {
+		share := float64(cancelledQty) / float64(order.RemainingPortions)
+		loanCancelled := round2(order.MarginLoan * share)
+		refundAmount = round2(cancelledValue - loanCancelled)
+		if refundAmount < 0 {
+			refundAmount = 0
+		}
+		if loanCancelled > 0 {
+			if _, err := s.orderRepo.ReduceMarginLoan(orderID, loanCancelled); err != nil {
+				return fmt.Errorf("failed to reduce margin loan on cancel: %w", err)
+			}
+		}
+	}
 
 	if newRemaining == 0 {
 		// Full cancel.
@@ -475,23 +527,15 @@ func orderPricePerUnit(listing *models.MarketListingRecord, input CreateOrderInp
 	}
 }
 
-// validateMargin checks that the account's available balance covers the
-// Initial Margin Cost for a margin order.
+// computeInitialMarginCost returns the IMC the user must cover up-front for a margin order,
+// in the account's currency.
 //
-//	MaintenanceMargin = contractSize * pricePerUnit * 10%
-//	InitialMarginCost = MaintenanceMargin * 1.1
-// validateMargin checks that the account's available balance covers the Initial Margin Cost.
 // Margin rates per asset type:
-//   stock:   50% of total position value  (quantity × contractSize × price × 50%)
-//   option:  100 shares/contract × 50% × underlying stock price  (quantity × contractSize × 100 × stockPrice × 50%)
-//   forex / futures: 10% of nominal value (quantity × contractSize × price × 10%)
-// InitialMarginCost = MaintenanceMargin × 1.1
-func (s *OrderService) validateMargin(accountID uint, listing *models.MarketListingRecord, quantity, contractSize int64, pricePerUnit, currencyRate float64) error {
-	balance, _, err := s.orderRepo.GetAccountBalance(accountID)
-	if err != nil {
-		return fmt.Errorf("failed to read account balance: %w", err)
-	}
-
+//   stock:           50% of total position value
+//   option:          100 shares/contract × 50% × underlying stock price
+//   forex / futures: 10% of nominal value
+// InitialMarginCost = MaintenanceMargin × 1.1 × currencyRate
+func (s *OrderService) computeInitialMarginCost(listing *models.MarketListingRecord, quantity, contractSize int64, pricePerUnit, currencyRate float64) (float64, error) {
 	qty := float64(quantity) * float64(contractSize)
 	var maintenanceMargin float64
 
@@ -501,23 +545,18 @@ func (s *OrderService) validateMargin(accountID uint, listing *models.MarketList
 	case "option":
 		opt, err := s.marketRepo.GetOptionByListingID(listing.ID)
 		if err != nil || opt == nil {
-			return fmt.Errorf("option contract data not found for margin calculation")
+			return 0, fmt.Errorf("option contract data not found for margin calculation")
 		}
 		underlying, err := s.marketRepo.GetListingRecordByID(opt.StockListingID)
 		if err != nil || underlying == nil {
-			return fmt.Errorf("underlying stock not found for option margin calculation")
+			return 0, fmt.Errorf("underlying stock not found for option margin calculation")
 		}
-		// Each option contract covers 100 shares; margin = 50% of underlying position value.
 		maintenanceMargin = qty * 100 * underlying.Price * 0.50
 	default: // forex, futures
 		maintenanceMargin = qty * pricePerUnit * 0.10
 	}
 
-	imc := round2(maintenanceMargin * 1.1 * currencyRate)
-	if balance < imc {
-		return fmt.Errorf("insufficient balance for margin order: need %.2f, have %.2f", imc, balance)
-	}
-	return nil
+	return round2(maintenanceMargin * 1.1 * currencyRate), nil
 }
 
 // toRSD converts an amount from the given currency to RSD using the rate provider.

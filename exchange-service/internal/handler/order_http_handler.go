@@ -425,6 +425,8 @@ type orderResponse struct {
 	StopValue         *float64 `json:"stopValue"`
 	IsAON             bool     `json:"isAON"`
 	IsMargin          bool     `json:"isMargin"`
+	MarginLoan        float64  `json:"marginLoan"`
+	StopTriggered     bool     `json:"stopTriggered"`
 	Status            string   `json:"status"`
 	IsDone            bool     `json:"isDone"`
 	RemainingPortions int64    `json:"remainingPortions"`
@@ -460,6 +462,8 @@ func orderToResponse(o *models.OrderRecord) orderResponse {
 		StopValue:         o.StopValue,
 		IsAON:             o.IsAON,
 		IsMargin:          o.IsMargin,
+		MarginLoan:        o.MarginLoan,
+		StopTriggered:     o.StopTriggered,
 		Status:            o.Status,
 		IsDone:            o.IsDone,
 		RemainingPortions: o.RemainingPortions,

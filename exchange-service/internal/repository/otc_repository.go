@@ -291,11 +291,15 @@ func (r *OtcRepository) ExpireValidContracts(referenceTime time.Time) (int, erro
 				return err
 			}
 
+			// Unexercised expiry: buyer's loss is the premium paid up-front; seller keeps it.
+			// (No new cash moves — premium was settled at offer acceptance.)
 			result := tx.Model(&models.OtcContractRecord{}).
 				Where("id = ? AND status = ?", contract.ID, models.OtcContractStatusValid).
 				Updates(map[string]interface{}{
-					"status":     models.OtcContractStatusExpired,
-					"updated_at": now,
+					"status":        models.OtcContractStatusExpired,
+					"buyer_profit":  -contract.Premium,
+					"seller_profit": contract.Premium,
+					"updated_at":    now,
 				})
 			if result.Error != nil {
 				return result.Error

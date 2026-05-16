@@ -369,12 +369,32 @@ func finalizeOtcExercise(tx *gorm.DB, contractID uint, buyerAccountID, sellerAcc
 
 	_ = cost // kept in the signature for symmetry with the compensation
 
+	// Snapshot the underlying market price and the contract's premium at exercise
+	// time so historical buyer/seller P&L is preserved on the contract row.
+	// Buyer (call holder) profit  = (market - strike) × amount - premium
+	// Seller (writer)     profit  = premium - (market - strike) × amount
+	var contract models.OtcContractRecord
+	if err := tx.First(&contract, contractID).Error; err != nil {
+		return fmt.Errorf("finalize: load contract for P&L snapshot: %w", err)
+	}
+	var listing models.MarketListingRecord
+	if err := tx.First(&listing, assetID).Error; err != nil {
+		return fmt.Errorf("finalize: load underlying listing for P&L snapshot: %w", err)
+	}
+	exercisedAtPrice := listing.Price
+	intrinsic := (exercisedAtPrice - contract.StrikePrice) * amount
+	buyerProfit := intrinsic - contract.Premium
+	sellerProfit := contract.Premium - intrinsic
+
 	now := time.Now().UTC()
 	result := tx.Model(&models.OtcContractRecord{}).
 		Where("id = ? AND status = ?", contractID, models.OtcContractStatusValid).
 		Updates(map[string]interface{}{
-			"status":     models.OtcContractStatusExercised,
-			"updated_at": now,
+			"status":             models.OtcContractStatusExercised,
+			"exercised_at_price": exercisedAtPrice,
+			"buyer_profit":       buyerProfit,
+			"seller_profit":      sellerProfit,
+			"updated_at":         now,
 		})
 	if result.Error != nil {
 		return result.Error
@@ -392,8 +412,11 @@ func revertOtcExerciseFinalization(tx *gorm.DB, contractID, buyerAccountID uint,
 	return tx.Model(&models.OtcContractRecord{}).
 		Where("id = ? AND status = ?", contractID, models.OtcContractStatusExercised).
 		Updates(map[string]interface{}{
-			"status":     models.OtcContractStatusValid,
-			"updated_at": now,
+			"status":             models.OtcContractStatusValid,
+			"exercised_at_price": 0,
+			"buyer_profit":       0,
+			"seller_profit":      0,
+			"updated_at":         now,
 		}).Error
 }
 

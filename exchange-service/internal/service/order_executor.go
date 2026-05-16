@@ -41,8 +41,21 @@ func (e *OrderExecutor) Run() {
 
 		listing := &order.Asset // preloaded by ListPendingActiveOrders
 
-		// Check if order conditions are currently satisfied.
-		if !conditionsMet(&order, listing) {
+		// Evaluate the order's execution conditions for this tick.
+		eval := evaluateOrder(&order, listing)
+
+		// stop_limit: persist the stop-triggered latch the first tick we cross the stop.
+		// This keeps the order armed as a pure limit order on subsequent ticks even if
+		// the price moves back through the stop value.
+		if eval.justTriggered {
+			if err := e.orderRepo.SetStopTriggered(order.ID); err != nil {
+				slog.Error("order executor: failed to latch stop_triggered", "orderID", order.ID, "error", err)
+			} else {
+				order.StopTriggered = true
+			}
+		}
+
+		if !eval.fillNow {
 			continue
 		}
 
@@ -115,8 +128,16 @@ func (e *OrderExecutor) Run() {
 					netAmount = round2(netAmount * rate)
 				}
 			}
-			if err := e.orderRepo.CreditAccount(order.AccountID, netAmount); err != nil {
-				slog.Error("order executor: failed to credit account on sell", "orderID", order.ID, "error", err)
+
+			// Apply sell proceeds toward outstanding margin loans on the same asset
+			// (FIFO by buy order creation date) before crediting the user. Loans were
+			// recorded in the account's currency, so netAmount must already be converted.
+			netAmount = e.settleMarginLoansFromProceeds(&order, netAmount)
+
+			if netAmount > 0 {
+				if err := e.orderRepo.CreditAccount(order.AccountID, netAmount); err != nil {
+					slog.Error("order executor: failed to credit account on sell", "orderID", order.ID, "error", err)
+				}
 			}
 		}
 
@@ -151,39 +172,110 @@ func (e *OrderExecutor) Run() {
 	}
 }
 
-// conditionsMet reports whether current market prices satisfy the order's
-// execution trigger.
+// orderEval is the per-tick verdict for an order.
+type orderEval struct {
+	fillNow       bool // the order should fill this tick at executeFillPrice
+	justTriggered bool // stop_limit: stop crossed for the first time this tick; persist the latch
+}
+
+// evaluateOrder reports whether current market prices satisfy the order's
+// execution trigger, and (for stop_limit) whether the stop just crossed.
 //
 //	market:     always executable
 //	limit buy:  ask <= limit_value
 //	limit sell: bid >= limit_value
 //	stop buy:   ask > stop_value  (then executes at market)
 //	stop sell:  bid < stop_value  (then executes at market)
-//	stop_limit: stop must trigger AND limit condition must be satisfied
-func conditionsMet(order *models.OrderRecord, listing *models.MarketListingRecord) bool {
+//
+// Stop-limit is two-phase. The stop acts as a one-way trigger:
+//   Buy:  arms when Ask >= stop_value (price rising into stop).
+//   Sell: arms when Bid <= stop_value (price falling into stop).
+//
+// Once armed, the latch is persisted and the order behaves as a limit order on
+// every subsequent tick — even if the price moves back through the stop value:
+//   Buy:  fill while Ask <= limit_value
+//   Sell: fill while Bid >= limit_value
+func evaluateOrder(order *models.OrderRecord, listing *models.MarketListingRecord) orderEval {
 	switch order.OrderType {
 	case "market":
-		return true
+		return orderEval{fillNow: true}
+
 	case "limit":
 		if order.Direction == "buy" {
-			return listing.Ask <= *order.LimitValue
+			return orderEval{fillNow: listing.Ask <= *order.LimitValue}
 		}
-		return listing.Bid >= *order.LimitValue
+		return orderEval{fillNow: listing.Bid >= *order.LimitValue}
+
 	case "stop":
 		if order.Direction == "buy" {
-			return listing.Ask > *order.StopValue
+			return orderEval{fillNow: listing.Ask > *order.StopValue}
 		}
-		return listing.Bid < *order.StopValue
+		return orderEval{fillNow: listing.Bid < *order.StopValue}
+
 	case "stop_limit":
-		// Stop triggers activation; limit guards the fill price.
-		// Buy:  Ask reaches or exceeds stop value, AND Ask is still within limit.
-		// Sell: Bid falls below stop value, AND Bid is still within limit.
-		if order.Direction == "buy" {
-			return listing.Ask >= *order.StopValue && listing.Ask <= *order.LimitValue
+		// Phase 1: arm the stop the first time the trigger price is crossed.
+		armed := order.StopTriggered
+		justArmed := false
+		if !armed {
+			if order.Direction == "buy" && listing.Ask >= *order.StopValue {
+				armed = true
+				justArmed = true
+			} else if order.Direction == "sell" && listing.Bid <= *order.StopValue {
+				armed = true
+				justArmed = true
+			}
 		}
-		return listing.Bid < *order.StopValue && listing.Bid >= *order.LimitValue
+		if !armed {
+			return orderEval{}
+		}
+		// Phase 2: once armed, behave as a pure limit order.
+		var fillNow bool
+		if order.Direction == "buy" {
+			fillNow = listing.Ask <= *order.LimitValue
+		} else {
+			fillNow = listing.Bid >= *order.LimitValue
+		}
+		return orderEval{fillNow: fillNow, justTriggered: justArmed}
 	}
-	return false
+	return orderEval{}
+}
+
+// settleMarginLoansFromProceeds applies sell proceeds (in the account's currency)
+// against the user's outstanding margin loans on the same asset, FIFO by buy order
+// creation date. Returns the remaining proceeds available to credit to the user.
+func (e *OrderExecutor) settleMarginLoansFromProceeds(sellOrder *models.OrderRecord, proceeds float64) float64 {
+	if proceeds <= 0 {
+		return proceeds
+	}
+	loans, err := e.orderRepo.ListOutstandingMarginLoansForUserAsset(sellOrder.UserID, sellOrder.UserType, sellOrder.AssetID)
+	if err != nil {
+		slog.Error("order executor: failed to list margin loans for sell settlement",
+			"orderID", sellOrder.ID, "error", err)
+		return proceeds
+	}
+	remaining := proceeds
+	for _, loan := range loans {
+		if remaining <= 0 {
+			break
+		}
+		toRepay := loan.MarginLoan
+		if toRepay > remaining {
+			toRepay = remaining
+		}
+		applied, err := e.orderRepo.ReduceMarginLoan(loan.ID, toRepay)
+		if err != nil {
+			slog.Error("order executor: failed to reduce margin loan",
+				"sellOrderID", sellOrder.ID, "buyOrderID", loan.ID, "error", err)
+			continue
+		}
+		remaining = round2(remaining - applied)
+		slog.Info("order executor: applied sell proceeds to margin loan",
+			"sellOrderID", sellOrder.ID, "buyOrderID", loan.ID, "applied", applied, "remaining", remaining)
+	}
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }
 
 // fillQuantity returns how many units to fill in this cycle.

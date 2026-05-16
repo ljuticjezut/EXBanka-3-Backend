@@ -185,6 +185,8 @@ type OrderRecord struct {
 	StopValue         *float64                 `gorm:"column:stop_value"`
 	IsAON             bool                     `gorm:"column:is_aon;not null;default:false"`
 	IsMargin          bool                     `gorm:"column:is_margin;not null;default:false"`
+	MarginLoan        float64                  `gorm:"column:margin_loan;not null;default:0"` // outstanding bank-fronted balance for margin buys, in the account's currency
+	StopTriggered     bool                     `gorm:"column:stop_triggered;not null;default:false"` // stop_limit latch: true once the stop value has been crossed
 	Status            string                   `gorm:"not null;default:'pending'"` // pending, approved, declined, done
 	ApprovedBy        *uint                    `gorm:"column:approved_by"`
 	PlacedBy          *uint                    `gorm:"column:placed_by"` // employee who placed the order on the bank's behalf (nil for client orders)
@@ -310,8 +312,13 @@ type OtcContractRecord struct {
 	SellerAccountID uint                   `gorm:"column:seller_account_id;not null;index"`
 	Status          string                 `gorm:"not null;default:'valid';index"`
 	BankID          *uint                  `gorm:"column:bank_id;index"`
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	// Snapshotted at exercise (or expiry) so historical P&L doesn't drift with the market.
+	// Zero on still-valid contracts.
+	ExercisedAtPrice float64 `gorm:"column:exercised_at_price;not null;default:0"`
+	BuyerProfit      float64 `gorm:"column:buyer_profit;not null;default:0"`
+	SellerProfit     float64 `gorm:"column:seller_profit;not null;default:0"`
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 func (OtcContractRecord) TableName() string { return "otc_contracts" }

@@ -555,27 +555,30 @@ type otcOfferResponse struct {
 }
 
 type otcContractResponse struct {
-	ID              uint                    `json:"id"`
-	OfferID         *uint                   `json:"offerId,omitempty"`
-	StockListingID  uint                    `json:"stockListingId"`
-	SellerHoldingID uint                    `json:"sellerHoldingId"`
-	Ticker          string                  `json:"ticker"`
-	Name            string                  `json:"name"`
-	Exchange        exchangeSummaryResponse `json:"exchange"`
-	Amount          float64                 `json:"amount"`
-	StrikePrice     float64                 `json:"strikePrice"`
-	CurrentPrice    float64                 `json:"currentPrice"`
-	Premium         float64                 `json:"premium"`
-	Profit          float64                 `json:"profit"`
-	SettlementDate  string                  `json:"settlementDate"`
-	BuyerID         uint                    `json:"buyerId"`
-	BuyerType       string                  `json:"buyerType"`
-	BuyerAccountID  uint                    `json:"buyerAccountId"`
-	SellerID        uint                    `json:"sellerId"`
-	SellerType      string                  `json:"sellerType"`
-	SellerAccountID uint                    `json:"sellerAccountId"`
-	Status          string                  `json:"status"`
-	CreatedAt       string                  `json:"createdAt"`
+	ID               uint                    `json:"id"`
+	OfferID          *uint                   `json:"offerId,omitempty"`
+	StockListingID   uint                    `json:"stockListingId"`
+	SellerHoldingID  uint                    `json:"sellerHoldingId"`
+	Ticker           string                  `json:"ticker"`
+	Name             string                  `json:"name"`
+	Exchange         exchangeSummaryResponse `json:"exchange"`
+	Amount           float64                 `json:"amount"`
+	StrikePrice      float64                 `json:"strikePrice"`
+	CurrentPrice     float64                 `json:"currentPrice"`
+	ExercisedAtPrice float64                 `json:"exercisedAtPrice"`
+	Premium          float64                 `json:"premium"`
+	Profit           float64                 `json:"profit"`       // buyer's perspective (legacy field name; kept for compatibility)
+	BuyerProfit      float64                 `json:"buyerProfit"`  // realized (exercised/expired) or live (valid)
+	SellerProfit     float64                 `json:"sellerProfit"` // realized (exercised/expired) or live (valid)
+	SettlementDate   string                  `json:"settlementDate"`
+	BuyerID          uint                    `json:"buyerId"`
+	BuyerType        string                  `json:"buyerType"`
+	BuyerAccountID   uint                    `json:"buyerAccountId"`
+	SellerID         uint                    `json:"sellerId"`
+	SellerType       string                  `json:"sellerType"`
+	SellerAccountID  uint                    `json:"sellerAccountId"`
+	Status           string                  `json:"status"`
+	CreatedAt        string                  `json:"createdAt"`
 }
 
 func otcOfferToResponse(offer models.OtcOfferRecord) otcOfferResponse {
@@ -612,28 +615,44 @@ func otcOfferToResponse(offer models.OtcOfferRecord) otcOfferResponse {
 }
 
 func otcContractToResponse(contract models.OtcContractRecord) otcContractResponse {
+	// For finalized contracts (exercised/expired) use the snapshotted P&L written at
+	// finalize/expire time so historical values don't drift with the market. For still
+	// "valid" contracts compute a live mark-to-market for buyer/seller from current price.
+	var buyerProfit, sellerProfit float64
+	if contract.Status == models.OtcContractStatusValid {
+		intrinsic := (contract.StockListing.Price - contract.StrikePrice) * contract.Amount
+		buyerProfit = roundOtcDisplayValue(intrinsic - contract.Premium)
+		sellerProfit = roundOtcDisplayValue(contract.Premium - intrinsic)
+	} else {
+		buyerProfit = roundOtcDisplayValue(contract.BuyerProfit)
+		sellerProfit = roundOtcDisplayValue(contract.SellerProfit)
+	}
+
 	return otcContractResponse{
-		ID:              contract.ID,
-		OfferID:         contract.OfferID,
-		StockListingID:  contract.StockListingID,
-		SellerHoldingID: contract.SellerHoldingID,
-		Ticker:          contract.StockListing.Ticker,
-		Name:            contract.StockListing.Name,
-		Exchange:        exchangeSummaryToResponse(contract.StockListing.Exchange.ToSummary()),
-		Amount:          contract.Amount,
-		StrikePrice:     contract.StrikePrice,
-		CurrentPrice:    contract.StockListing.Price,
-		Premium:         contract.Premium,
-		Profit:          roundOtcDisplayValue((contract.StockListing.Price-contract.StrikePrice)*contract.Amount - contract.Premium),
-		SettlementDate:  contract.SettlementDate.UTC().Format("2006-01-02"),
-		BuyerID:         contract.BuyerID,
-		BuyerType:       contract.BuyerType,
-		BuyerAccountID:  contract.BuyerAccountID,
-		SellerID:        contract.SellerID,
-		SellerType:      contract.SellerType,
-		SellerAccountID: contract.SellerAccountID,
-		Status:          contract.Status,
-		CreatedAt:       contract.CreatedAt.UTC().Format(time.RFC3339),
+		ID:               contract.ID,
+		OfferID:          contract.OfferID,
+		StockListingID:   contract.StockListingID,
+		SellerHoldingID:  contract.SellerHoldingID,
+		Ticker:           contract.StockListing.Ticker,
+		Name:             contract.StockListing.Name,
+		Exchange:         exchangeSummaryToResponse(contract.StockListing.Exchange.ToSummary()),
+		Amount:           contract.Amount,
+		StrikePrice:      contract.StrikePrice,
+		CurrentPrice:     contract.StockListing.Price,
+		ExercisedAtPrice: contract.ExercisedAtPrice,
+		Premium:          contract.Premium,
+		Profit:           buyerProfit, // legacy alias for buyerProfit
+		BuyerProfit:      buyerProfit,
+		SellerProfit:     sellerProfit,
+		SettlementDate:   contract.SettlementDate.UTC().Format("2006-01-02"),
+		BuyerID:          contract.BuyerID,
+		BuyerType:        contract.BuyerType,
+		BuyerAccountID:   contract.BuyerAccountID,
+		SellerID:         contract.SellerID,
+		SellerType:       contract.SellerType,
+		SellerAccountID:  contract.SellerAccountID,
+		Status:           contract.Status,
+		CreatedAt:        contract.CreatedAt.UTC().Format(time.RFC3339),
 	}
 }
 
