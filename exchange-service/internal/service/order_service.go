@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"log/slog"
 	"math"
 	"time"
 
@@ -163,6 +164,14 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 		if err := s.orderRepo.DebitAccount(input.AccountID, debit); err != nil {
 			return nil, fmt.Errorf("insufficient funds: %w", err)
 		}
+		if input.IsMargin && marginLoan > 0 {
+			_, accountCurrency, balErr := s.orderRepo.GetAccountBalance(input.AccountID)
+			if balErr != nil {
+				slog.Error("order: failed to read account currency for bank margin debit", "accountID", input.AccountID, "error", balErr)
+			} else {
+				s.adjustBankForMarginLoan(accountCurrency, -marginLoan, 0, "create")
+			}
+		}
 	}
 
 	now := time.Now().UTC()
@@ -320,7 +329,14 @@ func (s *OrderService) DeclineOrder(orderID, supervisorID uint) error {
 			return fmt.Errorf("failed to refund account on decline: %w", err)
 		}
 		// Discharge the (now unused) margin loan since the order was declined.
+		// The bank's cash that was fronted at create time is returned to its account.
 		if order.MarginLoan > 0 {
+			_, accountCurrency, balErr := s.orderRepo.GetAccountBalance(order.AccountID)
+			if balErr != nil {
+				slog.Error("order: failed to read account currency for bank margin refund on decline", "orderID", order.ID, "error", balErr)
+			} else {
+				s.adjustBankForMarginLoan(accountCurrency, order.MarginLoan, order.ID, "decline")
+			}
 			if err := s.orderRepo.SetMarginLoan(order.ID, 0); err != nil {
 				return fmt.Errorf("failed to clear margin loan on decline: %w", err)
 			}
@@ -369,6 +385,12 @@ func (s *OrderService) CancelOrder(orderID, requesterID uint, newRemaining int64
 			if _, err := s.orderRepo.ReduceMarginLoan(orderID, loanCancelled); err != nil {
 				return fmt.Errorf("failed to reduce margin loan on cancel: %w", err)
 			}
+			_, accountCurrency, balErr := s.orderRepo.GetAccountBalance(order.AccountID)
+			if balErr != nil {
+				slog.Error("order: failed to read account currency for bank margin refund on cancel", "orderID", order.ID, "error", balErr)
+			} else {
+				s.adjustBankForMarginLoan(accountCurrency, loanCancelled, order.ID, "cancel")
+			}
 		}
 	}
 
@@ -390,6 +412,36 @@ func (s *OrderService) CancelOrder(orderID, requesterID uint, newRemaining int64
 	}
 
 	return nil
+}
+
+// adjustBankForMarginLoan moves cash to/from EXBanka's account in the given
+// currency to mirror a margin loan disbursement or repayment.
+//   delta < 0 → debit the bank (loan disbursed at order creation)
+//   delta > 0 → credit the bank (loan repaid via sell proceeds, decline, or cancel)
+// Mis-seeded treasury accounts are logged but do not abort the caller, mirroring
+// the policy used by commission crediting in the order executor.
+func (s *OrderService) adjustBankForMarginLoan(currency string, delta float64, orderID uint, ctx string) {
+	if delta == 0 || currency == "" {
+		return
+	}
+	bankAccountID, err := s.orderRepo.GetBankAccountByCurrency(currency)
+	if err != nil {
+		slog.Error("order: bank account lookup failed for margin "+ctx, "currency", currency, "orderID", orderID, "error", err)
+		return
+	}
+	if bankAccountID == 0 {
+		slog.Warn("order: no bank account for currency, margin "+ctx+" skipped", "currency", currency, "orderID", orderID)
+		return
+	}
+	if delta < 0 {
+		if err := s.orderRepo.DebitAccount(bankAccountID, -delta); err != nil {
+			slog.Error("order: bank debit failed for margin "+ctx, "bankAccountID", bankAccountID, "amount", -delta, "orderID", orderID, "error", err)
+		}
+	} else {
+		if err := s.orderRepo.CreditAccount(bankAccountID, delta); err != nil {
+			slog.Error("order: bank credit failed for margin "+ctx, "bankAccountID", bankAccountID, "amount", delta, "orderID", orderID, "error", err)
+		}
+	}
 }
 
 // isSettlementExpired returns true when the listing is a futures or options
