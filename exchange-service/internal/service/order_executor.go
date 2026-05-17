@@ -142,9 +142,14 @@ func (e *OrderExecutor) Run() {
 		}
 
 		// Credit the bank's account with the proportional commission for buy fills.
-		// Commission was already deducted from the client's account at order creation.
+		// Commission was already deducted from the client's account at order creation
+		// for non-margin orders. For margin orders the commission is part of the
+		// bank's loan disbursement at create (totalCost includes commission), and
+		// gets recovered when the client sells and the loan is repaid — so no
+		// separate commission credit is needed here, or the bank would gain it
+		// back twice and the "bank cash drop" wouldn't equal the loan amount.
 		// The commission is in the asset's trading currency (exchange currency), not the user's account currency.
-		if order.Direction == "buy" && order.Commission > 0 {
+		if order.Direction == "buy" && order.Commission > 0 && !order.IsMargin {
 			fillCommission := round2(order.Commission * float64(fillQty) / float64(order.Quantity))
 			if fillCommission > 0 {
 				currencyKod := order.Asset.Exchange.Currency
@@ -267,6 +272,27 @@ func (e *OrderExecutor) settleMarginLoansFromProceeds(sellOrder *models.OrderRec
 			slog.Error("order executor: failed to reduce margin loan",
 				"sellOrderID", sellOrder.ID, "buyOrderID", loan.ID, "error", err)
 			continue
+		}
+		// Credit the bank account in the loan's currency: this is the cash the
+		// bank originally fronted at order creation, now coming back from the
+		// sell proceeds. Without this, the loan number on the order zeroes out
+		// but the bank's account never recovers the funds.
+		if applied > 0 {
+			_, loanCurrency, balErr := e.orderRepo.GetAccountBalance(loan.AccountID)
+			if balErr != nil {
+				slog.Error("order executor: failed to read account currency for margin repayment", "buyOrderID", loan.ID, "error", balErr)
+			} else if loanCurrency != "" {
+				bankID, err := e.orderRepo.GetBankAccountByCurrency(loanCurrency)
+				if err != nil {
+					slog.Error("order executor: bank lookup failed for margin repayment", "currency", loanCurrency, "buyOrderID", loan.ID, "error", err)
+				} else if bankID > 0 {
+					if err := e.orderRepo.CreditAccount(bankID, applied); err != nil {
+						slog.Error("order executor: failed to credit bank for margin repayment", "bankID", bankID, "amount", applied, "buyOrderID", loan.ID, "error", err)
+					}
+				} else {
+					slog.Warn("order executor: no bank account for currency, margin repayment not credited", "currency", loanCurrency, "buyOrderID", loan.ID)
+				}
+			}
 		}
 		remaining = round2(remaining - applied)
 		slog.Info("order executor: applied sell proceeds to margin loan",
