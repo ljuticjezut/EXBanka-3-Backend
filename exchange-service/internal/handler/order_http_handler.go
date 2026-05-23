@@ -431,6 +431,9 @@ type orderResponse struct {
 	IsDone            bool     `json:"isDone"`
 	RemainingPortions int64    `json:"remainingPortions"`
 	Commission        float64  `json:"commission"`
+	TotalPaid         float64  `json:"totalPaid"`
+	BalanceBefore     float64  `json:"balanceBefore"`
+	BalanceAfter      float64  `json:"balanceAfter"`
 	AfterHours        bool     `json:"afterHours"`
 	AccountID         uint     `json:"accountId"`
 	ApprovedBy        *uint    `json:"approvedBy"`
@@ -468,6 +471,9 @@ func orderToResponse(o *models.OrderRecord) orderResponse {
 		IsDone:            o.IsDone,
 		RemainingPortions: o.RemainingPortions,
 		Commission:        o.Commission,
+		TotalPaid:         o.TotalPaid,
+		BalanceBefore:     o.BalanceBefore,
+		BalanceAfter:      o.BalanceAfter,
 		AfterHours:        o.AfterHours,
 		AccountID:         o.AccountID,
 		ApprovedBy:        o.ApprovedBy,

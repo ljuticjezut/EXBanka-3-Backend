@@ -92,6 +92,22 @@ func (e *OrderExecutor) Run() {
 			// Non-fatal: order fill is committed; portfolio can be reconciled later.
 		}
 
+		// Refund the over-reservation for buy fills that came in below the
+		// order's committed price-per-unit (limit / stop_limit where the actual
+		// fill price beats the limit). The client was debited the worst case
+		// upfront; we hand back the price gap per fill so total_paid / balance_after
+		// settle to the real net spend.
+		if order.Direction == "buy" && !order.IsMargin && price < order.PricePerUnit {
+			overReservation := (order.PricePerUnit - price) * float64(fillQty) * float64(order.ContractSize)
+			refund := round2(overReservation * order.CurrencyRate)
+			if refund > 0 {
+				if err := e.orderRepo.RefundBuyOverReservation(order.ID, order.AccountID, refund); err != nil {
+					slog.Error("order executor: failed to refund buy over-reservation",
+						"orderID", order.ID, "amount", refund, "error", err)
+				}
+			}
+		}
+
 		// Credit account for sell fills, converting to account currency if needed.
 		// Commission is deducted from the proceeds and credited to the bank account.
 		if order.Direction == "sell" {

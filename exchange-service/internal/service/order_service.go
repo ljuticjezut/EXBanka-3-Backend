@@ -151,6 +151,8 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 	//   Margin:     only the Initial Margin Cost; the rest is fronted by the bank
 	//               and recorded as MarginLoan on the order, repaid from sell proceeds.
 	var marginLoan float64
+	var totalPaid float64
+	var balanceBefore, balanceAfter float64
 	if input.Direction == "buy" {
 		totalCost := round2((totalPrice + commission) * currencyRate)
 		debit := totalCost
@@ -161,9 +163,18 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 				marginLoan = 0
 			}
 		}
+		// Snapshot the balance just before the debit so we can store the
+		// before / after pair on the order record for the buy history.
+		preBalance, _, balErr := s.orderRepo.GetAccountBalance(input.AccountID)
+		if balErr != nil {
+			return nil, fmt.Errorf("failed to read account balance: %w", balErr)
+		}
+		balanceBefore = round2(preBalance)
 		if err := s.orderRepo.DebitAccount(input.AccountID, debit); err != nil {
 			return nil, fmt.Errorf("insufficient funds: %w", err)
 		}
+		totalPaid = debit
+		balanceAfter = round2(balanceBefore - debit)
 		if input.IsMargin && marginLoan > 0 {
 			_, accountCurrency, balErr := s.orderRepo.GetAccountBalance(input.AccountID)
 			if balErr != nil {
@@ -201,6 +212,9 @@ func (s *OrderService) CreateOrder(input CreateOrderInput) (*CreateOrderResult, 
 		AfterHours:        input.AfterHours,
 		AccountID:         input.AccountID,
 		MarginLoan:        marginLoan,
+		TotalPaid:         totalPaid,
+		BalanceBefore:     balanceBefore,
+		BalanceAfter:      balanceAfter,
 		LastModification:  now,
 		CreatedAt:         now,
 	}

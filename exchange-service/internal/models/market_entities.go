@@ -196,9 +196,18 @@ type OrderRecord struct {
 	CurrencyRate      float64                  `gorm:"column:currency_rate;not null;default:1"` // rate from asset currency to account currency at order creation
 	AfterHours        bool                     `gorm:"column:after_hours;not null;default:false"`
 	AccountID         uint                     `gorm:"column:account_id;not null"`
-	LastModification  time.Time                `gorm:"column:last_modification;not null"`
-	CreatedAt         time.Time                `gorm:"not null"`
-	Transactions      []OrderTransactionRecord `gorm:"foreignKey:OrderID"`
+	// TotalPaid is the amount actually debited from the user's account at order
+	// creation, in the account's currency. Non-margin: (totalPrice + commission) × rate.
+	// Margin: just the Initial Margin Cost (the rest is bank-fronted loan).
+	// Zero on sell orders (no upfront debit).
+	TotalPaid float64 `gorm:"column:total_paid;not null;default:0"`
+	// BalanceBefore / BalanceAfter snapshot the account balance immediately
+	// before and after the buy debit. Both zero for sell orders.
+	BalanceBefore    float64                  `gorm:"column:balance_before;not null;default:0"`
+	BalanceAfter     float64                  `gorm:"column:balance_after;not null;default:0"`
+	LastModification time.Time                `gorm:"column:last_modification;not null"`
+	CreatedAt        time.Time                `gorm:"not null"`
+	Transactions     []OrderTransactionRecord `gorm:"foreignKey:OrderID"`
 }
 
 func (OrderRecord) TableName() string { return "orders" }

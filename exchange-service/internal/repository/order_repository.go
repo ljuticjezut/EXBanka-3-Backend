@@ -197,6 +197,33 @@ func (r *OrderRepository) RefundToAccount(accountID uint, amount float64) error 
 		UpdateColumn("raspolozivo_stanje", gorm.Expr("raspolozivo_stanje + ?", amount)).Error
 }
 
+// RefundBuyOverReservation credits the over-reservation of a partial buy fill
+// back to the user's account and updates the order's total_paid / balance_after
+// so the buy-history snapshot reflects the actual net spend, not the worst-case
+// limit reservation captured at order creation. Used by the executor when a
+// limit / stop-limit fill comes in below the order's PricePerUnit.
+func (r *OrderRepository) RefundBuyOverReservation(orderID, accountID uint, refund float64) error {
+	if refund <= 0 {
+		return nil
+	}
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Table("accounts").
+			Where("id = ?", accountID).
+			Updates(map[string]interface{}{
+				"raspolozivo_stanje": gorm.Expr("raspolozivo_stanje + ?", refund),
+				"stanje":             gorm.Expr("stanje + ?", refund),
+			}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&models.OrderRecord{}).
+			Where("id = ?", orderID).
+			Updates(map[string]interface{}{
+				"total_paid":    gorm.Expr("total_paid - ?", refund),
+				"balance_after": gorm.Expr("balance_after + ?", refund),
+			}).Error
+	})
+}
+
 // GetSettlementDate returns the settlement date for a futures or options listing,
 // or nil if the asset type has no settlement date (stocks, forex).
 func (r *OrderRepository) GetSettlementDate(assetID uint) (*time.Time, error) {
