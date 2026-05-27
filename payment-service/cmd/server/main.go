@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	paymentv1 "github.com/RAF-SI-2025/EXBanka-3-Backend/payment-service/gen/proto/payment/v1"
 	prv1 "github.com/RAF-SI-2025/EXBanka-3-Backend/payment-service/gen/proto/payment_recipient/v1"
@@ -30,6 +32,11 @@ func main() {
 	db, err := database.Connect(cfg)
 	if err != nil {
 		slog.Error("DB connection failed", "error", err)
+		os.Exit(1)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		slog.Error("DB handle unavailable", "error", err)
 		os.Exit(1)
 	}
 	if err := database.Migrate(db); err != nil {
@@ -88,6 +95,7 @@ func main() {
 
 	httpMux := http.NewServeMux()
 	httpMux.HandleFunc("/health", healthCheck)
+	httpMux.HandleFunc("/ready", readinessCheck(sqlDB))
 	combinedPaymentHandler := handler.NewCombinedPaymentHandler(createPaymentHTTPH, mobileVerificationH, gwMux)
 	httpMux.Handle("/api/v1/payments", middleware.CORS(combinedPaymentHandler))
 	httpMux.Handle("/api/v1/payments/", middleware.CORS(combinedPaymentHandler))
@@ -124,4 +132,21 @@ func healthCheck(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, `{"status":"ok","service":"payment-service"}`)
+}
+
+func readinessCheck(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := db.PingContext(ctx); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"status":"not_ready","service":"payment-service","dependency":"database"}`)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"status":"ready","service":"payment-service"}`)
+	}
 }

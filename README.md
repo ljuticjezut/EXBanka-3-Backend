@@ -18,8 +18,14 @@ The shared backend in [cmd/server/main.go](/C:/Dev/Projects/SI/EXBanka-3-Backend
 is no longer the business runtime. It now serves only:
 
 - `GET /health`
+- `GET /ready`
 - `GET /swagger.json`
 - `GET /swagger-ui`
+
+Each active Go microservice exposes:
+
+- `GET /health` as a lightweight liveness endpoint.
+- `GET /ready` as a readiness endpoint that checks PostgreSQL connectivity.
 
 All business API calls are exposed through the root nginx gateway in
 [C:\Dev\Projects\SI\EXBanka-3-Frontend\nginx.conf](/C:/Dev/Projects/SI/EXBanka-3-Frontend/nginx.conf).

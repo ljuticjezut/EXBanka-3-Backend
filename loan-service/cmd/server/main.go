@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -28,6 +30,11 @@ func main() {
 		slog.Error("DB connection failed", "error", err)
 		os.Exit(1)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		slog.Error("DB handle unavailable", "error", err)
+		os.Exit(1)
+	}
 	if err := database.Migrate(db); err != nil {
 		slog.Error("DB migration failed", "error", err)
 		os.Exit(1)
@@ -50,6 +57,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthCheck)
+	mux.HandleFunc("/ready", readinessCheck(sqlDB))
 	mux.Handle("/api/v1/loans/", middleware.CORS(loanH))
 
 	httpServer := &http.Server{
@@ -104,4 +112,21 @@ func healthCheck(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, `{"status":"ok","service":"loan-service"}`)
+}
+
+func readinessCheck(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := db.PingContext(ctx); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"status":"not_ready","service":"loan-service","dependency":"database"}`)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"status":"ready","service":"loan-service"}`)
+	}
 }

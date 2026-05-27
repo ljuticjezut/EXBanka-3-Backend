@@ -18,6 +18,7 @@ func main() {
 	httpMux.HandleFunc("/swagger.json", swagger.HandlerJSON)
 	httpMux.HandleFunc("/swagger-ui", swagger.HandlerUI)
 	httpMux.HandleFunc("/health", healthCheck)
+	httpMux.HandleFunc("/ready", readinessCheck)
 
 	httpServer := &http.Server{
 		Addr:    ":" + httpPort,
@@ -47,6 +48,12 @@ func healthCheck(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, `{"status":"ok","service":"EXBanka"}`)
+}
+
+func readinessCheck(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprint(w, `{"status":"ready","service":"EXBanka"}`)
 }
 
 func envOrDefault(key, defaultVal string) string {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	employeev1 "github.com/RAF-SI-2025/EXBanka-3-Backend/employee-service/gen/proto/employee/v1"
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/employee-service/internal/config"
@@ -32,6 +34,11 @@ func main() {
 	db, err := database.Connect(cfg)
 	if err != nil {
 		slog.Error("DB connection failed", "error", err)
+		os.Exit(1)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		slog.Error("DB handle unavailable", "error", err)
 		os.Exit(1)
 	}
 	if err := database.Migrate(db); err != nil {
@@ -87,6 +94,7 @@ func main() {
 
 	httpMux := http.NewServeMux()
 	httpMux.HandleFunc("/health", healthCheck)
+	httpMux.HandleFunc("/ready", readinessCheck(sqlDB))
 	httpMux.Handle("/api/v1/actuaries", middleware.CORS(http.HandlerFunc(actuaryHTTPHandler.ListActuaries)))
 	httpMux.Handle("/api/v1/actuaries/", middleware.CORS(http.HandlerFunc(actuaryHTTPHandler.ActuaryRoutes)))
 	httpMux.Handle("/", middleware.CORS(gwMux))
@@ -120,6 +128,23 @@ func healthCheck(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, `{"status":"ok","service":"employee-service"}`)
+}
+
+func readinessCheck(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := db.PingContext(ctx); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"status":"not_ready","service":"employee-service","dependency":"database"}`)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"status":"ready","service":"employee-service"}`)
+	}
 }
 
 func envOrDefault(key, defaultVal string) string {
