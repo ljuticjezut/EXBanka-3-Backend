@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ type AlphaVantageClient struct {
 	mu          sync.Mutex
 	lastRequest time.Time
 	minInterval time.Duration // rate limit interval between requests
+	limiter     RateLimiter
 }
 
 func NewAlphaVantageClient(apiKey string) *AlphaVantageClient {
@@ -34,7 +36,24 @@ func NewAlphaVantageClient(apiKey string) *AlphaVantageClient {
 	}
 }
 
+func (c *AlphaVantageClient) WithRateLimiter(limiter RateLimiter) *AlphaVantageClient {
+	c.limiter = limiter
+	return c
+}
+
 func (c *AlphaVantageClient) rateLimit() {
+	if c.limiter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := c.limiter.Wait(ctx); err == nil {
+			return
+		}
+		slog.Warn("AlphaVantage Redis rate limiter unavailable, using local limiter")
+	}
+	c.localRateLimit()
+}
+
+func (c *AlphaVantageClient) localRateLimit() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

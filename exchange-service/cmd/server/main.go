@@ -12,6 +12,7 @@ import (
 	"time"
 
 	exchangev1 "github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/gen/proto/exchange/v1"
+	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/cache"
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/config"
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/database"
 	"github.com/RAF-SI-2025/EXBanka-3-Backend/exchange-service/internal/handler"
@@ -41,9 +42,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	redisClient := cache.NewRedisClient(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
+	if redisClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		if err := redisClient.Ping(ctx); err != nil {
+			slog.Warn("Redis unavailable, continuing with local exchange caches", "error", err)
+			_ = redisClient.Close()
+			redisClient = nil
+		} else {
+			slog.Info("Redis connected for exchange-service cache/coordination", "addr", cfg.RedisAddr, "db", cfg.RedisDB)
+			defer redisClient.Close()
+		}
+		cancel()
+	}
+
 	// Shared rate provider: same static rates used by the exchange rates page, with caching.
 	staticRates := provider.NewStaticRateProvider()
 	rateProvider := provider.NewCachedProvider(staticRates, staticRates, 24*time.Hour)
+	if redisClient != nil {
+		rateProvider.WithRedis(redisClient)
+	}
 
 	// Build shared repos and services before starting cron so they're reusable.
 	marketRepo := repository.NewMarketRepository(db)

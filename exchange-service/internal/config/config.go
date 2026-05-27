@@ -22,6 +22,10 @@ type Config struct {
 
 	AlphaVantageAPIKey string
 
+	RedisAddr     string
+	RedisPassword string
+	RedisDB       int
+
 	// Inter-bank protocol (Celina 5). OwnRoutingNumber is the 3-digit prefix
 	// used in our account numbers. PartnerBanksJSON is a JSON array of
 	// {code,baseUrl,outboundKey,inboundKey,displayName} entries; parsed once
@@ -34,16 +38,19 @@ func Load() *Config {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		DBHost:     getEnv("DB_HOST", "localhost"),
-		DBPort:     getEnv("DB_PORT", "5432"),
-		DBUser:     getEnv("DB_USER", "postgres"),
-		DBPassword: getEnv("DB_PASSWORD", "postgres"),
-		DBName:     getEnv("DB_NAME", "bankdb"),
-		DBSSLMode:  getEnv("DB_SSL_MODE", "disable"),
-		GRPCPort:   getEnv("GRPC_PORT", "9098"),
-		HTTPPort:   getEnv("HTTP_PORT", "8088"),
+		DBHost:             getEnv("DB_HOST", "localhost"),
+		DBPort:             getEnv("DB_PORT", "5432"),
+		DBUser:             getEnv("DB_USER", "postgres"),
+		DBPassword:         getEnv("DB_PASSWORD", "postgres"),
+		DBName:             getEnv("DB_NAME", "bankdb"),
+		DBSSLMode:          getEnv("DB_SSL_MODE", "disable"),
+		GRPCPort:           getEnv("GRPC_PORT", "9098"),
+		HTTPPort:           getEnv("HTTP_PORT", "8088"),
 		JWTSecret:          getEnv("JWT_SECRET", "super-secret-jwt-key-change-in-production"),
 		AlphaVantageAPIKey: getEnv("ALPHA_VANTAGE_API_KEY", "demo"),
+		RedisAddr:          getEnv("REDIS_ADDR", ""),
+		RedisPassword:      getEnv("REDIS_PASSWORD", ""),
+		RedisDB:            getEnvInt("REDIS_DB", 0),
 		OwnRoutingNumber:   getEnvInt("BANK_ROUTING_NUMBER", 333),
 		PartnerBanksJSON:   getEnv("PARTNER_BANKS_JSON", "[]"),
 	}
