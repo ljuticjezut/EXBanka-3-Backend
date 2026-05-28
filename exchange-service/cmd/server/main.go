@@ -139,7 +139,8 @@ func main() {
 	}()
 	defer cronScheduler.Stop()
 
-	exchangeH := handler.NewExchangeHandler()
+	exchangeSvc := service.NewExchangeServiceWithProvider(rateProvider)
+	exchangeH := handler.NewExchangeHandlerWithService(exchangeSvc)
 	marketProvider := provider.NewDatabaseMarketProvider(marketRepo)
 	marketSvc := service.NewMarketService(marketProvider)
 	marketH := handler.NewMarketHTTPHandler(cfg, marketSvc, marketRepo)
