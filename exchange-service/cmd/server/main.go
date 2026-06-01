@@ -154,6 +154,9 @@ func main() {
 	taxCollector := service.NewTaxCollector(taxSvc, orderRepo, taxRepo)
 	taxH := handler.NewTaxHTTPHandler(cfg, taxSvc, taxCollector)
 
+	watchlistRepo := repository.NewWatchlistRepository(db)
+	watchlistH := handler.NewWatchlistHTTPHandler(cfg, watchlistRepo)
+
 	fundH := handler.NewFundHTTPHandler(cfg, fundSvc)
 
 	ibOtcLocalH := handler.NewInterbankOtcHTTPHandler(
@@ -209,6 +212,8 @@ func main() {
 	httpMux.Handle("/api/v1/orders", middleware.CORS(http.HandlerFunc(orderH.OrdersCollection)))
 	httpMux.Handle("/api/v1/orders/", middleware.CORS(http.HandlerFunc(orderH.OrderRoutes)))
 	httpMux.Handle("/api/v1/tax/", middleware.CORS(http.HandlerFunc(taxH.TaxRoutes)))
+	httpMux.Handle("/api/v1/watchlists", middleware.CORS(http.HandlerFunc(watchlistH.WatchlistsCollection)))
+	httpMux.Handle("/api/v1/watchlists/", middleware.CORS(http.HandlerFunc(watchlistH.WatchlistRoutes)))
 	httpMux.Handle("/api/v1/funds", middleware.CORS(http.HandlerFunc(fundH.FundRoutes)))
 	httpMux.Handle("/api/v1/funds/", middleware.CORS(http.HandlerFunc(fundH.FundRoutes)))
 	httpMux.Handle("/api/v1/interbank-otc/", middleware.CORS(http.HandlerFunc(ibOtcLocalH.Routes)))
